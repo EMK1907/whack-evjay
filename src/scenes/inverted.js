@@ -49,11 +49,12 @@ const FOG = { color: 0x1c0907, density: 0.03 };
 
 // Globe sequence timeline (seconds after pressing E). goTo at 7.0s, Quirkland visible ~7.4s.
 const T = {
-  camMove: 1.0,    // camera glides to the vantage point
-  error: 1.4,      // ERROR! effect, globe glitches; then the mini world appears
+  error: 1.4,      // ERROR! effect; the hologram glitches
+  morph: 1.0,      // hologram starts cross-fading into the mini world…
+  morphEnd: 2.2,   // …fully transformed
   pull: 3.2,       // the dark world starts being pulled into the globe…
-  pullEnd: 5.0,    // …and is gone
-  zoomEnd: 7.0,    // camera has zoomed into the fire hydrant → goTo('quirkland')
+  pullEnd: 5.0,    // …and is gone; the camera pushes in
+  zoomEnd: 7.0,    // camera reaches the fire hydrant's face → goTo('quirkland')
 };
 
 // Post-processing looks: the dark night city needs an exposure lift under ACES and bloom on the
@@ -68,9 +69,6 @@ let seq = null; // globe sequence state (null until E is pressed)
 // ---------- helpers ----------
 
 const clamp01 = (x) => Math.min(1, Math.max(0, x));
-const smooth = (x) => x * x * (3 - 2 * x);
-const easeIn = (x) => x * x * x;
-const easeOutBack = (x) => 1 + 2.70158 * Math.pow(x - 1, 3) + 1.70158 * Math.pow(x - 1, 2);
 const TAU = Math.PI * 2;
 const pick = (rand, arr) => arr[Math.floor(rand() * arr.length)];
 
@@ -783,15 +781,15 @@ function buildPortal(parent) {
   parent.add(pool, points, glow, light);
 
   return {
-    /** active: 0..1 (player standing in position), flash: 0..1 (just flipped). */
-    update(dt, time, active, flash) {
+    /** active: 0..1 (player standing in position), flash: 0..1 (just flipped), fade: 0..1 light scale. */
+    update(dt, time, active, flash, fade = 1) {
       const pulse = 0.5 + 0.5 * Math.sin(time * 2.4);
       const vh = ((typeof window !== 'undefined' && window.innerHeight) || 800) * Math.min((typeof window !== 'undefined' && window.devicePixelRatio) || 1, 2) / 2;
       mat.uniforms.uTime.value = time;
       mat.uniforms.uScale.value = vh;
       mat.uniforms.uBoost.value = active * 0.6 + flash;
       poolMat.opacity = Math.min(1, 0.45 + pulse * 0.2 + active * 0.3 + flash * 0.5);
-      light.intensity = 18 + pulse * 8 + active * 20 + flash * 120;
+      light.intensity = (18 + pulse * 8 + active * 20 + flash * 120) * fade;
       const gs = 3.2 + pulse * 0.6 + active * 1.2 + flash * 5;
       glow.scale.set(gs, gs, 1);
     },
@@ -1417,8 +1415,52 @@ function landSound() {
 }
 
 // ---------- globe sequence (after E) ----------
+//
+// Everything is driven by the sequence time `seq.t` (frame-rate independent) through smooth curves:
+//   • the camera follows ONE cubic-Bézier dolly from the player's eye to the hydrant's face, sampled by
+//     arc length, with its progress from a monotone cubic spline (C1-continuous speed, eases in and out);
+//   • the Earth hologram cross-fades into the mini world (no flicker-swapping); all globe scaling is
+//     anchored at the globe's base, so it never dips below its resting height;
+//   • the world is pulled in toward a point just BELOW the globe (ground side) and the ceiling toward a
+//     point just ABOVE it, so neither the ground, the pedestal nor the ceiling ever crosses the globe.
 
-const easeInOut = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+const smoother = (x) => x * x * x * (x * (x * 6 - 15) + 10);           // smootherstep: zero 1st/2nd derivative at ends
+const window01 = (t, a, b) => smoother(clamp01((t - a) / (b - a)));
+const GLOBE_BASE_Y = GLOBE.y - 1.25;   // lowest point of the globe's contents (mini world planet + grass)
+const GLOBE_TOP_Y = GLOBE.y + DOME_R;  // top of the mouth dome
+const PULL_PIVOT_LOW = new THREE.Vector3(GLOBE.x, GLOBE_BASE_Y - 0.15, GLOBE.z);
+const PULL_PIVOT_HIGH = new THREE.Vector3(GLOBE.x, GLOBE_TOP_Y + 0.3, GLOBE.z);
+
+/** Monotone cubic interpolation (Fritsch–Carlson) through [[t, v], …], zero slope at both ends. */
+function monotoneCurve(keys) {
+  const n = keys.length, xs = keys.map((k) => k[0]), ys = keys.map((k) => k[1]);
+  const d = [];
+  for (let i = 0; i < n - 1; i++) d.push((ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]));
+  const m = new Array(n).fill(0);
+  for (let i = 1; i < n - 1; i++) m[i] = d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (d[i] === 0) { m[i] = m[i + 1] = 0; continue; }
+    const a = m[i] / d[i], b = m[i + 1] / d[i], h = a * a + b * b;
+    if (h > 9) { const k = 3 / Math.sqrt(h); m[i] = k * a * d[i]; m[i + 1] = k * b * d[i]; }
+  }
+  m[0] = 0;
+  m[n - 1] = 0;
+  return (x) => {
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[n - 1]) return ys[n - 1];
+    let i = 0;
+    while (x > xs[i + 1]) i++;
+    const h = xs[i + 1] - xs[i], t = (x - xs[i]) / h, t2 = t * t, t3 = t2 * t;
+    return (2 * t3 - 3 * t2 + 1) * ys[i] + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * ys[i + 1] + (t3 - t2) * h * m[i + 1];
+  };
+}
+
+/** Scale/transform a group about a fixed pivot (uniform scale + spin about the vertical axis). */
+function shrinkAbout(group, pivot, scale, angle) {
+  group.scale.setScalar(scale);
+  group.quaternion.setFromAxisAngle(UP, angle);
+  group.position.copy(pivot).sub(pivot.clone().multiplyScalar(scale).applyQuaternion(group.quaternion));
+}
 
 function startGlobeSequence() {
   const { player, interact, effects, audio, camera } = ctx;
@@ -1427,39 +1469,61 @@ function startGlobeSequence() {
   player.enabled = false;
   camera.up.copy(player.up);
 
-  // Vantage point: back off from the globe on the player's side, slightly above it.
+  // Turn the mini world so its front (local +X, where the hydrant faces) looks back at the player.
   const away = camera.position.clone().sub(GLOBE);
   away.y = 0;
   if (away.lengthSq() < 1e-4) away.set(1, 0, 0);
   away.normalize();
-  const vantage = GLOBE.clone().addScaledVector(away, 4.4);
-  vantage.y = GLOBE.y + 0.8;
-  const lookAt = GLOBE.clone().add(new THREE.Vector3(0, 0.25, 0));
-
-  // Turn the mini world so its front (local +X, where the hydrant faces) looks at the camera.
   g.mini.group.rotation.y = Math.atan2(-away.z, away.x);
+
+  // Where the dolly ends: just in front of the hydrant's face (mini world at its final size/pose).
+  g.globe.position.copy(GLOBE);
+  g.globe.scale.setScalar(1);
+  g.mini.group.position.set(0, 0, 0);
+  g.mini.group.scale.setScalar(1);
+  g.globe.updateMatrixWorld(true);
+  const h = g.mini.hydrant.group;
+  const face = h.localToWorld(new THREE.Vector3(0.045, 0.114, 0)); // middle of the face, between eyes and smile
+  const front = h.localToWorld(new THREE.Vector3(1, 0.114, 0)).sub(h.localToWorld(new THREE.Vector3(0, 0.114, 0))).normalize();
+  const end = face.clone().addScaledVector(front, 0.1);
+
+  // One continuous dolly: crane back/up to frame the globe, then glide straight in along the hydrant's gaze.
+  const startDist = Math.hypot(camera.position.x - GLOBE.x, camera.position.z - GLOBE.z);
+  const c1 = GLOBE.clone().addScaledVector(away, Math.max(startDist, 4.6)).setY(GLOBE.y + 1.6);
+  const c2 = end.clone().addScaledVector(front, 2.2).add(new THREE.Vector3(0, 0.35, 0));
+  const path = new THREE.CubicBezierCurve3(camera.position.clone(), c1, c2, end);
+  // Progress along the path over time: quick-ish crane, slow drift while the world is pulled in, then the push-in.
+  const progress = monotoneCurve([[0, 0], [1.9, 0.3], [T.pullEnd, 0.42], [T.zoomEnd, 1]]);
 
   const tone = (f, d, o) => () => audio.tone(f, d, o);
   const cues = [
-    ...[523, 659, 784, 1047].map((f, i) => ({ at: T.error + i * 0.09, fn: tone(f, 1.0, { type: 'sine', volume: 0.08 }) })),
+    ...[523, 659, 784, 1047].map((f, i) => ({ at: T.morph + i * 0.12, fn: tone(f, 1.2, { type: 'sine', volume: 0.08 }) })),
     ...Array.from({ length: 8 }, (_, i) => ({ at: T.pull + i * 0.22, fn: tone(220 - i * 18, 0.35, { type: 'sawtooth', volume: 0.045 }) })),
     { at: T.pullEnd - 0.3, fn: tone(45, 1.0, { type: 'sine', volume: 0.35 }) },
     ...Array.from({ length: 7 }, (_, i) => ({ at: T.pullEnd + 0.6 + i * 0.18, fn: tone(330 * Math.pow(1.19, i), 0.3, { type: 'sine', volume: 0.06 }) })),
-  ];
+  ].sort((a, b) => a.at - b.at);
 
   seq = {
     t: 0,
-    camFrom: camera.position.clone(),
     qFrom: camera.quaternion.clone(),
-    camTo: vantage,
-    lookAt,
-    qTo: new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(vantage, lookAt, camera.up)),
+    path,
+    progress,
+    face,
+    lookAt: GLOBE.clone().add(new THREE.Vector3(0, 0.25, 0)),
+    look: new THREE.Vector3(),
+    m: new THREE.Matrix4(),
+    q: new THREE.Quaternion(),
     cues,
-    revealed: false,
-    zoom: null,
     left: false,
+    worldFade: 1,
     bg0: s.scene.background.clone(),
     fog0: s.scene.fog.color.clone(),
+    earthOpacity: g.earthMat.opacity,
+    gridOpacity: g.gridMat.opacity,
+    orbitOpacity: g.orbitMat.opacity,
+    light0: g.light.intensity,
+    // Lights inside the world (lamps, portal): they shrink in with it but keep their brightness, so fade them.
+    worldLights: (() => { const l = []; s.world.traverse((o) => { if (o.isLight) l.push([o, o.intensity]); }); return l; })(),
   };
 
   effects.error({ duration: T.error * 1000 });
@@ -1473,88 +1537,72 @@ function updateGlobeSequence(dt) {
   seq.t += dt;
   const t = seq.t;
 
-  while (seq.cues.length) {
-    seq.cues.sort((a, b) => a.at - b.at);
-    if (seq.cues[0].at > t) break;
-    seq.cues.shift().fn();
-  }
+  while (seq.cues.length && seq.cues[0].at <= t) seq.cues.shift().fn();
 
-  // Camera glides to the vantage point and frames the globe (until the zoom takes over).
-  if (t < T.pullEnd) {
-    const cm = smooth(clamp01(t / T.camMove));
-    camera.position.lerpVectors(seq.camFrom, seq.camTo, cm);
-    camera.quaternion.slerpQuaternions(seq.qFrom, seq.qTo, cm);
-  }
+  // ---- Camera: one continuous dolly; orientation eases from the player's view onto the globe, then the face.
+  seq.path.getPointAt(clamp01(seq.progress(t)), camera.position);
+  seq.look.lerpVectors(seq.lookAt, seq.face, window01(t, T.pullEnd - 0.4, T.zoomEnd - 0.3));
+  seq.m.lookAt(camera.position, seq.look, camera.up);
+  seq.q.setFromRotationMatrix(seq.m);
+  camera.quaternion.slerpQuaternions(seq.qFrom, seq.q, window01(t, 0, 1.3));
+  camera.fov = 75 - 25 * window01(t, T.pullEnd, T.zoomEnd);
+  camera.updateProjectionMatrix();
 
-  // 1. ERROR: the hologram glitches between Earth and the mini world.
-  if (t < T.error) {
-    const glitch = Math.random() < 0.22;
-    g.earthGroup.visible = !glitch;
-    mini.group.visible = glitch;
-    mini.update(dt, glitch ? 1 : 0);
-    g.globe.scale.setScalar(1 + (Math.random() - 0.5) * 0.16);
-    g.globe.position.set(GLOBE.x + (Math.random() - 0.5) * 0.08, GLOBE.y, GLOBE.z + (Math.random() - 0.5) * 0.08);
-    return;
-  }
-  if (!seq.revealed) {
-    seq.revealed = true;
-    g.globe.position.copy(GLOBE);
-    g.earthGroup.visible = false;
-    mini.group.visible = true;
-    g.light.intensity = 0; // the cyan hologram light gives way to the mini world's own warm lighting
-  }
+  // ---- Hologram: glitches during the ERROR, then expands a touch and fades out (anchored at its base).
+  const morph = window01(t, T.morph, T.morphEnd);
+  const glitching = t < T.error;
+  const jitter = 0.035 * (1 - window01(t, T.error - 0.5, T.error)); // only during the error, dying away smoothly
+  const flicker = glitching ? (Math.random() < 0.25 ? 0.35 : 1) : 1;
+  const es = 1 + 0.12 * morph;
+  g.earthGroup.scale.setScalar(es);
+  g.earthGroup.position.set((Math.random() - 0.5) * jitter, GLOBE_R * (es - 1), (Math.random() - 0.5) * jitter);
+  g.earthGroup.rotation.y += dt * 0.25;
+  g.earthMat.opacity = seq.earthOpacity * flicker * (1 - morph);
+  g.gridMat.opacity = seq.gridOpacity * (1 - morph);
+  g.orbitMat.opacity = seq.orbitOpacity * (1 - morph);
+  g.orbit.rotation.z += dt * 0.5;
+  g.earthGroup.visible = morph < 1;
+  g.orbit.visible = morph < 1;
+  g.light.intensity = seq.light0 * (1 - morph); // the cyan light gives way to the mini world's warm lighting
 
-  // 2. The bright mini world with its fire hydrant.
-  const r = t - T.error;
-  mini.update(dt, clamp01(r / 0.45));
-  const pk = smooth(clamp01(r / 0.6));
+  // ---- Mini world: grows smoothly out of the hologram (no overshoot), bottom anchored above the pedestal.
+  mini.group.visible = morph > 0;
+  const ms = 0.55 + 0.45 * morph;
+  mini.group.scale.setScalar(ms);
+  mini.group.position.set(0, (GLOBE.y - GLOBE_BASE_Y) * (1 - ms), 0);
+  mini.update(dt, morph);
+
+  // Post-processing and the dark world's lights ease over to the mini world's look.
+  const pk = window01(t, T.morph, T.morphEnd + 0.3);
   const blend = {};
   for (const key of Object.keys(POST_DARK)) blend[key] = POST_DARK[key] + (POST_MINI[key] - POST_DARK[key]) * pk;
   ctx.post?.set(blend);
-  g.globe.scale.setScalar(0.85 + 0.15 * easeOutBack(clamp01(r / 0.5)));
-  g.orbit.rotation.z += dt * 0.6;
-  g.orbitMat.opacity = 0.6 * (1 - clamp01(r / 0.5));
-  const L = s.lights, base = s.lightBase;
-  L.hemi.intensity = base.hemi * (1 - 0.5 * clamp01(r / 1.0)); // the dark world dims next to it
 
-  // 3. The whole dark inverted world is pulled into the globe (swirling shrink about its centre).
-  if (t > T.pull) {
-    const c = clamp01((t - T.pull) / (T.pullEnd - T.pull));
-    const scale = Math.max(1e-4, 1 - smooth(c));
-    const w = s.world;
-    w.scale.setScalar(scale);
-    w.quaternion.setFromAxisAngle(UP, c * c * PI * 2);
-    w.position.copy(GLOBE).sub(GLOBE.clone().multiplyScalar(scale).applyQuaternion(w.quaternion));
-    w.visible = c < 1;
+  // ---- The dark world is pulled into the globe: ground side toward a point just under the globe,
+  // ceiling toward a point just above it — both shrink and swirl, never crossing the globe.
+  const c = window01(t, T.pull, T.pullEnd);
+  const L = s.lights, base = s.lightBase;
+  L.hemi.intensity = base.hemi * (1 - 0.5 * pk) * (1 - c);
+  L.top.intensity = base.top * (1 - c);
+  L.below.intensity = base.below * (1 - c);
+  if (c > 0) {
+    const fade = Math.pow(1 - c, 2);
+    seq.worldFade = fade;
+    for (const [light, i0] of seq.worldLights) light.intensity = i0 * fade;
+    const scale = Math.max(1e-4, 1 - c);
+    const angle = c * c * PI * 2;
+    shrinkAbout(s.world, PULL_PIVOT_LOW, scale, angle);
+    shrinkAbout(s.sky, PULL_PIVOT_HIGH, scale, angle);
+    s.world.visible = s.sky.visible = c < 1;
     const kk = 1 - c;
-    L.hemi.intensity = base.hemi * 0.5 * kk;
-    L.top.intensity = base.top * kk;
-    L.below.intensity = base.below * kk;
     s.scene.background.copy(seq.bg0).multiplyScalar(kk);
     s.scene.fog.color.copy(seq.fog0).multiplyScalar(kk);
     s.scene.fog.density = s.fogDensity * kk;
   }
 
-  // 4. Zoom down into the mini world and right into the fire hydrant, then Quirkland.
-  if (t >= T.pullEnd) {
-    if (!seq.zoom) {
-      g.globe.scale.setScalar(1);
-      g.globe.updateMatrixWorld(true);
-      const h = mini.hydrant.group;
-      const face = h.localToWorld(new THREE.Vector3(0.045, 0.114, 0)); // middle of the face, between eyes and smile
-      const front = h.localToWorld(new THREE.Vector3(1, 0.114, 0)).sub(h.localToWorld(new THREE.Vector3(0, 0.114, 0))).normalize();
-      seq.zoom = { face, end: face.clone().addScaledVector(front, 0.1), from: camera.position.clone() };
-    }
-    const z = clamp01((t - T.pullEnd) / (T.zoomEnd - T.pullEnd));
-    const e = easeInOut(z);
-    camera.position.lerpVectors(seq.zoom.from, seq.zoom.end, e);
-    camera.lookAt(new THREE.Vector3().lerpVectors(seq.lookAt, seq.zoom.face, smooth(Math.min(1, z * 1.4))));
-    camera.fov = 75 - 25 * e;
-    camera.updateProjectionMatrix();
-    if (z >= 1 && !seq.left) {
-      seq.left = true;
-      ctx.goTo('quirkland');
-    }
+  if (t >= T.zoomEnd && !seq.left) {
+    seq.left = true;
+    ctx.goTo('quirkland');
   }
 }
 
@@ -1589,6 +1637,10 @@ export default {
     if (ctx !== c) return; // left the scene while loading
 
     const lights = buildEnvironment(scene, world, player.colliders, tex);
+    // The ceiling gets its own group so the globe sequence can pull it in from above the globe.
+    const sky = new THREE.Group();
+    scene.add(sky);
+    sky.add(world.children.find((o) => o.userData.isCeiling));
     const portal = buildPortal(world);
     const globe = buildGlobe(scene, world, player.colliders);
     // The mini world keeps its own look: the night HDRI must not light it.
@@ -1598,7 +1650,7 @@ export default {
 
     const lightBase = { hemi: lights.hemi.intensity, top: lights.top.intensity, below: lights.below.intensity };
     s = {
-      portal, scene, world, lights, lightBase, fogDensity: FOG.density, globe,
+      portal, scene, world, sky, lights, lightBase, fogDensity: FOG.density, globe,
       time: 0, flash: 0, active: 0, pendingFlip: null, wasGrounded: false, flips: 0,
     };
 
@@ -1637,7 +1689,7 @@ export default {
     const target = p.grounded && inZone(p.position) ? 1 : 0;
     s.active += (target - s.active) * Math.min(1, dt * 6);
     s.flash = Math.max(0, s.flash - dt * 1.5);
-    s.portal.update(dt, s.time, s.active, s.flash);
+    s.portal.update(dt, s.time, s.active, s.flash, seq ? seq.worldFade : 1);
 
     if (p.grounded && !s.wasGrounded) landSound();
     s.wasGrounded = p.grounded;
