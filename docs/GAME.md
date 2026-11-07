@@ -66,9 +66,9 @@ The player can explore this environment.
 
 ## 5. The Golden Pressure Plate — Flipping Gravity
 
-The player discovers a glowing golden pressure plate positioned on the side of a building, alongside other buildings.
+The player discovers a glowing golden pressure plate: a golden ring on the ground (the right-way-up side of the world), among the buildings. It glows so it can be seen from the ceiling.
 
-The player must position themselves directly vertically opposite the pressure plate and jump.
+While standing on the ceiling, the player must position themselves directly vertically opposite (above) the pressure plate and jump.
 
 When the player jumps in the correct position, their orientation flips, allowing them to stand on the other side.
 
