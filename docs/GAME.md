@@ -66,9 +66,9 @@ The player can explore this environment.
 
 ## 5. The Golden Pressure Plate — Flipping Gravity
 
-The player discovers a glowing golden pressure plate positioned on the side of a building, alongside other buildings.
+The player discovers a glowing golden pressure plate: a golden ring on the ground (the right-way-up side of the world), among the buildings. It glows so it can be seen from the ceiling.
 
-The player must position themselves directly vertically opposite the pressure plate and jump.
+While standing on the ceiling, the player must position themselves directly vertically opposite (above) the pressure plate and jump.
 
 When the player jumps in the correct position, their orientation flips, allowing them to stand on the other side.
 
@@ -85,20 +85,16 @@ The player approaches the globe and presses **E** to interact.
 When they interact with it:
 
 - An error effect occurs.
-- The globe changes its appearance and displays the word **QUIRKLAND**.
-- The globe reveals four sections:
-  1. **Air** — gushing air.
-  2. **Fire** — burning fire.
-  3. **Nature** — long exotic trees.
-  4. **Water** — flowing water.
+- The globe transforms into a bright, cheerful miniature Quirkland that looks like a child's imagination: warm, soft rolling hills of bright green grass swaying in the breeze, wobbly paths, round leafy trees, flowers, butterflies, and candy scattered everywhere (lollipops, sweets, candy canes, gumdrops). Above it is a dome "ceiling" in bright childlike colours, covered in many identical big smiling mouths — slightly unsettling. It is warmly lit and a strong contrast to the dark red inverted world. No text is shown.
+- Standing on this mini world is a small, friendly red fire hydrant.
 
 The entire inverted world then begins compressing into the globe.
 
 Everything is pulled into it until the world has disappeared.
 
-The globe remains in darkness.
+The camera then zooms smoothly down into the mini world and right into the fire hydrant until it fills the screen, and the player finds themselves in **Quirkland**, where the fire hydrant is.
 
-After a moment, the globe warps back out, and the player finds themselves in **Quirkland**.
+The whole sequence, from pressing E to arriving in Quirkland, takes about 7–8 seconds.
 
 ## 7. Quirkland — Meeting the Fire Hydrant
 
