@@ -72,14 +72,15 @@ export class Player {
     return () => this._jumpListeners.delete(fn);
   }
 
-  /** Place the player (feet) at `position`, facing `yaw` radians, normal gravity. */
-  spawn(position, yaw = 0) {
+  /** Place the player (feet) at `position`, facing `yaw` radians. `flipped` starts with gravity along +Y. */
+  spawn(position, yaw = 0, { flipped = false } = {}) {
     this.position.copy(position);
     this.velocity.set(0, 0, 0);
     this.yaw = yaw;
     this.pitch = 0;
     this.orientation.identity();
-    this._view.identity();
+    if (flipped) this.orientation.setFromAxisAngle(FORWARD, Math.PI);
+    this._view.copy(this.orientation);
     this._flipT = 1;
     this.grounded = false;
     this._applyCamera();
