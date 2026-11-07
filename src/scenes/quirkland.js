@@ -5,7 +5,7 @@ import * as THREE from 'three';
 //   Air (north-east), Water (north-west), Nature (south-west), Fire (south-east).
 // Arrival → Fire Hydrant intro cutscene → he follows the player as a faded companion.
 // In the Water zone, E on the hydrant shows his (weak) ability.
-// Inhabitants (E): Ember the dragon (Fire).
+// Inhabitants (E): Ember the dragon (Fire), Skye the kite (Air).
 // TEMP: the grey cube at the north edge goes to 'ending' until the masked figure (§9) is built.
 
 const NAME = 'quirkland';
@@ -955,6 +955,116 @@ function lightTorch(t, g) {
   }, 380);
 }
 
+// --- Skye the kite (Air) ---
+function buildSkye() {
+  const at = zoneCenter('Air', 27);
+  const g = new THREE.Group();
+  g.position.copy(at);
+  g.rotation.y = Math.atan2(-at.x, -at.z);
+  ctx.scene.add(g);
+  mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.6, 6), std(0x8a6a4a), 0, 0.3, 0, g);
+
+  const kite = new THREE.Group();
+  kite.position.set(0, 3.6, 0.6);
+  g.add(kite);
+  const corners = [new THREE.Vector2(0, 1.2), new THREE.Vector2(0.85, 0), new THREE.Vector2(0, -1.5), new THREE.Vector2(-0.85, 0)];
+  const cols = [0xff5fa2, 0xffd23f, 0x5ad1ff, 0x9b7bff];
+  for (let i = 0; i < 4; i++) {
+    const shape = new THREE.Shape([new THREE.Vector2(0, 0), corners[i], corners[(i + 1) % 4]]);
+    mesh(new THREE.ShapeGeometry(shape), std(cols[i], { side: THREE.DoubleSide, emissive: cols[i], emissiveIntensity: 0.35 }), 0, 0, 0, kite);
+  }
+  const spar = std(0xfff6e0);
+  mesh(new THREE.BoxGeometry(0.04, 2.7, 0.04), spar, 0, -0.15, -0.03, kite);
+  mesh(new THREE.BoxGeometry(1.7, 0.04, 0.04), spar, 0, 0, -0.03, kite);
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff }), black = new THREE.MeshBasicMaterial({ color: 0x111111 });
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.SphereGeometry(0.13, 12, 8), white, sx * 0.24, 0.3, 0.03, kite).scale.z = 0.4;
+    mesh(new THREE.SphereGeometry(0.065, 8, 6), black, sx * 0.24, 0.29, 0.08, kite).scale.z = 0.4;
+  }
+  const smile = mesh(new THREE.TorusGeometry(0.2, 0.03, 6, 16, Math.PI), black, 0, 0, 0.04, kite);
+  smile.rotation.z = Math.PI;
+
+  // Tail with bows, and the string down to the stake.
+  const bowShape = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(0.2, 0.12), new THREE.Vector2(0.2, -0.12)]);
+  const bowGeo = new THREE.ShapeGeometry(bowShape);
+  const bows = [];
+  for (let i = 0; i < 5; i++) {
+    const b = new THREE.Group();
+    kite.add(b);
+    const m = std(cols[i % 4], { side: THREE.DoubleSide, emissive: cols[i % 4], emissiveIntensity: 0.3 });
+    mesh(bowGeo, m, 0, 0, 0, b);
+    mesh(bowGeo, m, 0, 0, 0, b).rotation.z = Math.PI;
+    bows.push(b);
+  }
+  const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff });
+  const tailLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(new Array(6).fill(0).map(() => V(0, 0, 0))), lineMat);
+  kite.add(tailLine);
+  const string = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V(0, 0.6, 0), V(0, 0, 0)]), lineMat);
+  g.add(string);
+
+  const wind = new Particles({ count: 400, color: 0xffffff, color2: 0xcfe6ff, size: 0.14, grow: 0.6 });
+
+  const skye = {
+    name: 'Skye', color: '#ff7ac4', group: g,
+    line: 'Every windy day, a child somewhere runs with a kite. That\'s what keeps me flying!',
+    reaction: 'I used to be able to do that with water. Sort of.',
+    ability: (gg) => skyeGust(skye, gg),
+    kite, wind, loop: 0,
+  };
+
+  every(() => {
+    kite.position.y = 3.6 + Math.sin(time * 1.3) * 0.3;
+    kite.position.x = Math.sin(time * 0.7) * 0.4;
+    kite.rotation.z = Math.sin(time * 0.9) * 0.15 + skye.loop;
+    kite.rotation.x = -0.2 + Math.sin(time * 1.1) * 0.08;
+    const tp = tailLine.geometry.attributes.position;
+    for (let i = 0; i < 6; i++) {
+      const x = Math.sin(time * 3 - i * 0.9) * 0.12 * i, y = -1.5 - i * 0.45, z = -i * 0.12;
+      tp.setXYZ(i, x, y, z);
+      if (i > 0) { bows[i - 1].position.set(x, y, z); bows[i - 1].rotation.y = Math.sin(time * 4 + i) * 0.6; }
+    }
+    tp.needsUpdate = true;
+    const sp = string.geometry.attributes.position;
+    sp.setXYZ(1, kite.position.x, kite.position.y - 0.4, kite.position.z);
+    sp.needsUpdate = true;
+  });
+
+  ctx.interact.add(g, () => meet(skye), { distance: 7 });
+  return skye;
+}
+
+async function skyeGust(s, g) {
+  const { player, audio } = ctx;
+  const from = V(0, 0, 0);
+  audio.noise(2.5, { volume: 0.3 });
+  audio.tone(180, 1.5, { type: 'sine', volume: 0.08 });
+  let acc = 0, t = 0;
+  // A strong gust lifts the player, holds them a moment, then sets them down gently.
+  await tween(3.6, (k, dt) => {
+    t += dt;
+    s.loop = ease(Math.min(1, t / 1.2)) * Math.PI * 2; // the kite does a loop-the-loop
+    s.kite.getWorldPosition(from);
+    const pp = player.position;
+    acc += dt * 160;
+    while (acc > 1) {
+      acc--;
+      if (Math.random() < 0.5) {
+        const o = V(from.x + (Math.random() - 0.5) * 3, from.y + (Math.random() - 0.5) * 2, from.z + (Math.random() - 0.5) * 3);
+        const d = V(pp.x - o.x, pp.y + 1 - o.y, pp.z - o.z).normalize().multiplyScalar(12);
+        s.wind.emit(o, V(d.x, d.y + 1, d.z), 1.1);
+      } else {
+        const a = Math.random() * Math.PI * 2, r = 1 + Math.random() * 0.6;
+        s.wind.emit(V(pp.x + Math.cos(a) * r, pp.y + Math.random() * 0.6, pp.z + Math.sin(a) * r), V(-Math.sin(a) * 4, 5, Math.cos(a) * 4), 0.8);
+      }
+    }
+    const hold = 25 * dt; // cancels one frame of gravity (player.js GRAVITY)
+    if (t < 0.7) player.velocity.y = 5 + hold;
+    else if (t < 1.6) player.velocity.y = hold;
+    else if (!player.grounded) player.velocity.y = -2.8 + hold;
+  });
+  s.loop = 0;
+}
+
 // ---------- zone title ----------
 function showZone(name) {
   if (!toastEl) return;
@@ -987,6 +1097,7 @@ export default {
     buildWorld();
     hydrant = buildHydrant();
     buildEmber();
+    buildSkye();
 
     ctx.player.spawn(V(0, 0, 5), 0);
     intro(gen);
