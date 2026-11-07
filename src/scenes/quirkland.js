@@ -5,7 +5,7 @@ import * as THREE from 'three';
 //   Air (north-east), Water (north-west), Nature (south-west), Fire (south-east).
 // Arrival → Fire Hydrant intro cutscene → he follows the player as a faded companion.
 // In the Water zone, E on the hydrant shows his (weak) ability.
-// Inhabitants (E): Ember the dragon (Fire), Skye the kite (Air).
+// Inhabitants (E): Ember the dragon (Fire), Skye the kite (Air), Sprout the beanstalk (Nature).
 // TEMP: the grey cube at the north edge goes to 'ending' until the masked figure (§9) is built.
 
 const NAME = 'quirkland';
@@ -1065,6 +1065,193 @@ async function skyeGust(s, g) {
   s.loop = 0;
 }
 
+// --- Sprout the beanstalk (Nature) ---
+function buildSprout() {
+  const at = zoneCenter('Nature', 27);
+  const g = new THREE.Group();
+  g.position.copy(at);
+  g.rotation.y = Math.atan2(-at.x, -at.z);
+  ctx.scene.add(g);
+  const sway = new THREE.Group();
+  g.add(sway);
+
+  const stalkMat = std(0x46c23a, { emissive: 0x1d6b12, emissiveIntensity: 0.4 });
+  const vineMat = std(0x8be04e, { emissive: 0x2f7a12, emissiveIntensity: 0.35 });
+  const leafMat = std(0x6ad84a, { emissive: 0x2a8a1a, emissiveIntensity: 0.3, flatShading: true });
+  const H = 14;
+  const pts = [], vine = [];
+  for (let i = 0; i <= 16; i++) {
+    const y = (i / 16) * H, a = i * 0.75, r = 0.6 * (1 - i / 22);
+    pts.push(V(Math.sin(a) * r, y, Math.cos(a) * r));
+    vine.push(V(Math.sin(a + 2.4) * (r + 0.35), y, Math.cos(a + 2.4) * (r + 0.35)));
+  }
+  const curve = new THREE.CatmullRomCurve3(pts);
+  mesh(new THREE.TubeGeometry(curve, 160, 0.4, 12), stalkMat, 0, 0, 0, sway);
+  mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vine), 160, 0.12, 8), vineMat, 0, 0, 0, sway);
+
+  const leafGeo = new THREE.SphereGeometry(1, 10, 6);
+  for (let i = 1; i < 15; i++) {
+    const p = curve.getPoint(i / 15);
+    const a = i * 2.1;
+    const leaf = mesh(leafGeo, leafMat, p.x + Math.cos(a) * 0.9, p.y, p.z + Math.sin(a) * 0.9, sway);
+    leaf.scale.set(0.9, 0.07, 0.45);
+    leaf.rotation.set(0, -a, 0.35);
+  }
+  // Bean pods.
+  const podMat = std(0x9be35a, { emissive: 0x3a7a10, emissiveIntensity: 0.3 });
+  for (let i = 0; i < 4; i++) {
+    const p = curve.getPoint(0.3 + i * 0.15);
+    const a = i * 1.7 + 1;
+    const pod = mesh(leafGeo, podMat, p.x + Math.cos(a) * 0.7, p.y - 0.4, p.z + Math.sin(a) * 0.7, sway);
+    pod.scale.set(0.16, 0.5, 0.16);
+  }
+  // A cloud at the top — it reaches the sky.
+  const cloudMat = std(0xffffff, { emissive: 0xdfe8ff, emissiveIntensity: 0.3 });
+  for (let i = 0; i < 6; i++) {
+    mesh(leafGeo, cloudMat, Math.cos(i) * 1.6, H + 0.3 + Math.sin(i * 2) * 0.3, Math.sin(i) * 1.6, sway).scale.setScalar(1.1 + (i % 3) * 0.3);
+  }
+
+  // Friendly face low on the stalk.
+  const fp = curve.getPoint(1.7 / H);
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff }), black = new THREE.MeshBasicMaterial({ color: 0x111111 });
+  const face = new THREE.Group();
+  face.position.set(fp.x, fp.y, fp.z + 0.38);
+  sway.add(face);
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.SphereGeometry(0.12, 10, 8), white, sx * 0.15, 0.12, 0, face);
+    mesh(new THREE.SphereGeometry(0.06, 8, 6), black, sx * 0.15, 0.12, 0.09, face);
+  }
+  const smile = mesh(new THREE.TorusGeometry(0.14, 0.025, 6, 14, Math.PI), black, 0, -0.06, 0.04, face);
+  smile.rotation.z = Math.PI;
+
+  const blocker = mesh(new THREE.CylinderGeometry(1.1, 1.1, 4, 12), new THREE.MeshBasicMaterial(), 0, 2, 0, g);
+  blocker.visible = false;
+  collide(blocker);
+
+  every(() => {
+    sway.rotation.z = Math.sin(time * 0.8) * 0.025;
+    sway.rotation.x = Math.sin(time * 0.6) * 0.02;
+  });
+
+  const leaves = new Particles({ count: 300, color: 0x9dff6a, color2: 0xffe14d, size: 0.16, gravity: 5, drag: 0.8 });
+  const sprout = {
+    name: 'Sprout', color: '#6fe36a', group: g,
+    line: 'Plant one little bean in a story and look what happens!',
+    reaction: 'They still read that one at bedtime, you know.',
+    ability: (gg) => sproutGrow(sprout, gg),
+    leaves, grown: [],
+  };
+  ctx.interact.add(blocker, () => meet(sprout), { distance: 6 });
+  ctx.interact.add(sway, () => meet(sprout), { distance: 6 });
+  return sprout;
+}
+
+const TREE_TRUNKS = [0xb06cff, 0x2fd0c0, 0xff8fc8, 0xffb347];
+const TREE_TOPS = [0xff4fd8, 0x3ff2e6, 0xffc23f, 0x9cff3f, 0x7a7bff];
+const FRUIT = [0xffffff, 0xfff27a, 0xff7ad9, 0x7affff];
+
+function exoticTree(h) {
+  const tree = new THREE.Group();
+  const bend = rand() * 6.28, lean = 0.5 + rand() * 0.8;
+  const pts = [];
+  for (let i = 0; i <= 5; i++) {
+    const t = i / 5;
+    pts.push(V(Math.cos(bend + t * 2) * lean * t * t, t * h, Math.sin(bend + t * 2) * lean * t * t));
+  }
+  const curve = new THREE.CatmullRomCurve3(pts);
+  const trunkCol = TREE_TRUNKS[Math.floor(rand() * TREE_TRUNKS.length)];
+  const trunk = mesh(new THREE.TubeGeometry(curve, 24, 0.28, 8), std(trunkCol, { emissive: trunkCol, emissiveIntensity: 0.2 }), 0, 0, 0, tree);
+  const top = pts[pts.length - 1];
+  const col = TREE_TOPS[Math.floor(rand() * TREE_TOPS.length)];
+  const leafMat = std(col, { emissive: col, emissiveIntensity: 0.35, flatShading: true });
+  const type = Math.floor(rand() * 4);
+  if (type === 0) {          // umbrella with drooping fringe
+    mesh(new THREE.SphereGeometry(1, 16, 8), leafMat, top.x, top.y, top.z, tree).scale.set(2.6, 0.6, 2.6);
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * 6.28;
+      mesh(new THREE.SphereGeometry(0.3, 8, 6), leafMat, top.x + Math.cos(a) * 2.3, top.y - 0.6, top.z + Math.sin(a) * 2.3, tree).scale.y = 2;
+    }
+  } else if (type === 1) {   // stacked spiral cones
+    for (let i = 0; i < 4; i++) {
+      const c = mesh(new THREE.ConeGeometry(2 - i * 0.4, 1.6, 7), leafMat, top.x, top.y - 0.6 + i * 1.0, top.z, tree);
+      c.rotation.y = i * 0.5;
+    }
+  } else if (type === 2) {   // cluster of balls
+    for (let i = 0; i < 6; i++) {
+      const a = i * 1.1;
+      mesh(new THREE.IcosahedronGeometry(1 + rand() * 0.5, 1), leafMat,
+        top.x + Math.cos(a) * 1.1, top.y + (i % 2) * 0.8, top.z + Math.sin(a) * 1.1, tree);
+    }
+  } else {                   // palm-like blades
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * 6.28;
+      const b = mesh(new THREE.SphereGeometry(1, 10, 6), leafMat, top.x + Math.cos(a) * 1.4, top.y - 0.2, top.z + Math.sin(a) * 1.4, tree);
+      b.scale.set(1.8, 0.12, 0.45);
+      b.rotation.set(0, -a, -0.35);
+    }
+  }
+  for (let i = 0; i < 5; i++) {   // glowing fruit
+    const a = rand() * 6.28;
+    const fc = FRUIT[Math.floor(rand() * FRUIT.length)];
+    mesh(new THREE.SphereGeometry(0.18, 8, 6), new THREE.MeshBasicMaterial({ color: fc }),
+      top.x + Math.cos(a) * (0.8 + rand()), top.y - 0.5 - rand() * 0.5, top.z + Math.sin(a) * (0.8 + rand()), tree);
+  }
+  return { tree, trunk };
+}
+
+function removeTree(t) {
+  ctx.scene.remove(t.tree);
+  ctx.player.colliders = ctx.player.colliders.filter((c) => c !== t.trunk);
+  t.tree.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
+}
+
+async function sproutGrow(s, g) {
+  const { player, audio } = ctx;
+  for (const t of s.grown) removeTree(t);
+  s.grown = [];
+
+  // Giant exotic trees burst out of the ground in a ring around the player.
+  const c = player.position.clone();
+  const sproutAt = s.group.position;
+  const N = 9;
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * Math.PI * 2 + rand() * 0.3;
+    const r = 5.5 + rand() * 2.5;
+    const x = c.x + Math.cos(a) * r, z = c.z + Math.sin(a) * r;
+    if (Math.hypot(x - sproutAt.x, z - sproutAt.z) < 3) continue;
+    const t = exoticTree(6 + rand() * 4);
+    t.tree.position.set(x, 0, z);
+    t.tree.scale.setScalar(0.001);
+    t.spin = rand() * 6.28;
+    t.delay = s.grown.length * 0.14;
+    ctx.scene.add(t.tree);
+    s.grown.push(t);
+  }
+  audio.tone(55, 2.2, { type: 'sine', volume: 0.25 });
+  const GROW = 1.1;
+  let tt = 0;
+  await tween(GROW + s.grown.length * 0.14, (k, dt) => {
+    tt += dt;
+    for (const t of s.grown) {
+      const local = (tt - t.delay) / GROW;
+      if (local <= 0) continue;
+      if (!t.popped) {
+        t.popped = true;
+        audio.tone(200 + Math.random() * 300, 0.25, { type: 'triangle', volume: 0.08 });
+        for (let j = 0; j < 30; j++) {
+          const a = Math.random() * 6.28;
+          s.leaves.emit(V(t.tree.position.x, 0.2, t.tree.position.z), V(Math.cos(a) * 3, 4 + Math.random() * 4, Math.sin(a) * 3), 1.2);
+        }
+      }
+      const e = Math.max(0.001, easeOutBack(Math.min(1, local)));
+      t.tree.scale.set(e, e, e);
+      t.tree.rotation.y = t.spin + (1 - Math.min(1, local)) * 1.5;
+    }
+  });
+  if (!alive(g)) return;
+  for (const t of s.grown) collide(t.trunk);
+}
+
 // ---------- zone title ----------
 function showZone(name) {
   if (!toastEl) return;
@@ -1098,6 +1285,7 @@ export default {
     hydrant = buildHydrant();
     buildEmber();
     buildSkye();
+    buildSprout();
 
     ctx.player.spawn(V(0, 0, 5), 0);
     intro(gen);
