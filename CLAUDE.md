@@ -16,7 +16,7 @@ First-person 3D browser game in Three.js. Full spec: docs/GAME.md — follow it 
   A scene ends by calling ctx.goTo('<next scene>').
 
 ## Ownership — only edit files you own
-- Emir: src/main.js, src/core/player.js, src/core/interact.js, src/scenes/inverted.js
+- Emir: src/main.js, src/core/player.js, src/core/interact.js, src/core/audio.js, src/scenes/inverted.js
 - Varshan: src/core/dialogue.js, src/scenes/quirkland.js
 - Joshua: src/core/effects.js, src/scenes/conveyor.js, fall.js, ending.js
 - Need a change in someone else's file? Stop and tell the user instead of editing it.
