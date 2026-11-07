@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // Quirkland (Varshan) — docs/GAME.md §7–9.
 // A child's imagination: soft rolling green hills, wobbly paths and candy everywhere. There is no sky —
@@ -7,7 +7,8 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // Arrival: the globe transition zooms into the Fire Hydrant; the camera pulls back to the player standing
 // right in front of him, and his intro cutscene plays. Afterwards he follows the player as a companion.
 // Every character has a `remembered` value (0–1) that controls how faded / desaturated they look.
-// Inhabitants so far (E): the Intergalactic Kangaroo, the Infernal and the Kite (Skye).
+// Inhabitants so far (E): the Intergalactic Kangaroo, the Infernal, the Kite (Skye), the Rock Guardian,
+// Water Girl and Tongue Guy.
 // TEMP: the grey cube at the end of the north path goes to 'ending' until the masked figure (§9) is built.
 
 const NAME = 'quirkland';
@@ -20,10 +21,13 @@ const CEIL_R = 95, CEIL_H = 34; // ceiling dome (ellipsoid) radius / height
 const MOUTH_SIZE = 5.5;
 
 // How much children remember each character: 1 = bright and strong, 0 = gone.
-const REMEMBERED = { hydrant: 0.2, kangaroo: 1.0, infernal: 0.9, kite: 0.85 };
+const REMEMBERED = { hydrant: 0.2, kangaroo: 1.0, infernal: 0.9, kite: 0.85, rock: 0.6, water: 0.45, tongue: 0.3 };
 
 // Where the inhabitants live (kept clear of candy and trees).
-const SPOTS = { kangaroo: [29, 12], infernal: [-15, -26], kite: [20, -16] };
+const SPOTS = {
+  kangaroo: [29, 12], infernal: [-15, -26], kite: [20, -16],
+  rock: [-25, 11], water: [-3, 31], tongue: [-34, -7],
+};
 
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 
@@ -53,6 +57,7 @@ let busy = false;     // an ability / conversation is playing
 let pathPts = [];     // sampled path centre points (keeps props off the paths)
 let pathEnds = [];
 let props = [];       // occupied [x, z, radius]
+let shake = 0;        // camera shake amount (decays)
 
 const alive = (g) => ctx !== null && g === gen;
 
@@ -1600,6 +1605,527 @@ async function kiteTornado(k, g) {
   tor.group.visible = false;
 }
 
+// ===== 4. The Rock Guardian (remembered 0.6) =====
+// Smooth lumpy boulder with moss growing on its upward-facing side.
+function boulderGeo(r, seed) {
+  let geo = new THREE.SphereGeometry(1, 48, 32);
+  geo.deleteAttribute('normal');
+  geo.deleteAttribute('uv');
+  geo = mergeVertices(geo);
+  const pos = geo.attributes.position, v = V(0, 0, 0);
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const n = 1 + 0.11 * Math.sin(3 * v.x + seed) * Math.sin(4 * v.y + 2 * seed) * Math.sin(3.5 * v.z + 3 * seed)
+                + 0.05 * Math.sin(7 * v.x - seed) * Math.sin(6 * v.z + seed);
+    v.multiplyScalar(n * r);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  geo.computeVertexNormals();
+  const nor = geo.attributes.normal, col = new Float32Array(pos.count * 3);
+  const rock = new THREE.Color(), moss = new THREE.Color(0x5fae3a), c = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    rock.setHSL(0.08, 0.06, 0.42 + 0.08 * Math.sin(v.x * 5 + v.z * 4 + seed));
+    const m = smooth(0.2, 0.6, nor.getY(i) + 0.25 * Math.sin(v.x * 3 + seed) * Math.cos(v.z * 3 - seed));
+    c.copy(rock).lerp(moss, m);
+    col.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return geo;
+}
+
+function glowSprite(color, size) {
+  const tex = canvasTex(`glow${color}`, (g, s) => {
+    const grd = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grd.addColorStop(0, color);
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, s, s);
+  }, 128);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+  sp.scale.setScalar(size);
+  return sp;
+}
+
+function buildRockGuardian() {
+  const g = standAt(SPOTS.rock);
+  const rockMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
+  const mossMat = std(0x5fae3a, { roughness: 1 });
+  const body = new THREE.Group();
+  g.add(body);
+  for (const sx of [-1, 1]) mesh(boulderGeo(0.8, sx * 3 + 1), rockMat, sx * 0.85, 0.7, 0, body);
+  mesh(boulderGeo(1.6, 2), rockMat, 0, 2.6, 0, body).scale.set(1.15, 1, 0.9);
+  mesh(boulderGeo(0.85, 5), rockMat, 0, 4.25, 0.25, body);
+  mesh(boulderGeo(0.5, 9), rockMat, 0, 4.85, 0.75, body).scale.set(1.1, 0.4, 0.5); // heavy brow
+  // One big glowing gold eye — no pupil.
+  mesh(new THREE.SphereGeometry(0.32, 48, 32), new THREE.MeshBasicMaterial({ color: 0xffc83a }), 0, 4.4, 0.98, body);
+  const halo = glowSprite('rgba(255,200,60,0.9)', 1.8);
+  halo.position.set(0, 4.4, 1.2);
+  body.add(halo);
+  const eyeLight = new THREE.PointLight(0xffc83a, 3, 8, 1.5);
+  eyeLight.position.set(0, 4.4, 1.6);
+  body.add(eyeLight);
+  const smile = mesh(new THREE.TorusGeometry(0.3, 0.05, 12, 32, Math.PI), std(0x2a2a26), 0, 3.95, 1.02, body);
+  smile.rotation.z = Math.PI;
+  // Moss tufts.
+  for (const [x, y, z, s] of [[0, 5.0, 0.1, 0.5], [-1.4, 3.6, 0, 0.45], [1.4, 3.7, -0.1, 0.4], [0.6, 3.5, 0.9, 0.3]]) {
+    mesh(new THREE.SphereGeometry(1, 32, 16), mossMat, x, y, z, body).scale.set(s, s * 0.4, s);
+  }
+  // Long gorilla arms (pivot at the shoulder).
+  const arms = [], fists = [];
+  for (const sx of [-1, 1]) {
+    const arm = new THREE.Group();
+    arm.position.set(sx * 1.75, 3.3, 0);
+    body.add(arm);
+    mesh(boulderGeo(0.6, sx + 11), rockMat, 0, -0.5, 0, arm);
+    mesh(boulderGeo(0.55, sx + 13), rockMat, 0, -1.4, 0.1, arm);
+    const fist = mesh(boulderGeo(0.68, sx + 17), rockMat, 0, -2.3, 0.2, arm);
+    arms.push(arm);
+    fists.push(fist);
+  }
+  const blocker = mesh(new THREE.CylinderGeometry(1.9, 1.9, 5, 24), new THREE.MeshBasicMaterial(), 0, 2.5, 0, g);
+  blocker.visible = false;
+  collide(blocker);
+
+  const fx = {
+    fire: new Particles({ count: 600, color: 0xffb030, color2: 0xc81800, size: 0.5, grow: 2.2, gravity: -1, drag: 1.5 }),
+    flash: new Particles({ count: 300, color: 0xfff4c0, color2: 0xff7a00, size: 0.6, grow: 1.5, additive: true, drag: 2 }),
+    dust: new Particles({ count: 600, color: 0xc9b28a, color2: 0xe8dcc4, size: 0.5, grow: 3, gravity: -0.3, drag: 1.8 }),
+    rocks: new Particles({ count: 300, color: 0x5b5650, color2: 0x3b3833, size: 0.18, gravity: 14, drag: 0.2 }),
+  };
+  const wave = mesh(new THREE.CylinderGeometry(1, 1, 0.8, 96, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xfff1d0, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }), 0, 0, 0);
+  const ring = mesh(new THREE.RingGeometry(0.8, 1, 96).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }), 0, 0, 0);
+
+  const rg = {
+    name: 'Rock Guardian', color: '#ffc83a', group: g,
+    line: 'Kids still build forts and castles out of stones. Not as many as they used to... but enough to keep me standing. Stand back!',
+    reaction: 'Okay. My ears are ringing. ...Do I have ears?',
+    ability: (gg) => rockSmash(rg, gg),
+    body, arms, fists, fx, wave, ring, halo, eyeLight,
+  };
+  rg.fade = makeFadable(g, REMEMBERED.rock);
+
+  every(() => {
+    const b = Math.sin(time * 1.1);
+    body.position.y = b * 0.04;
+    halo.scale.setScalar(1.7 + Math.sin(time * 2.3) * 0.15);
+    eyeLight.intensity = 3 + Math.sin(time * 2.3) * 0.6;
+  });
+
+  ctx.interact.add(g, () => meet(rg), { distance: 8 });
+  return rg;
+}
+
+async function rockSmash(r, g) {
+  const { audio } = ctx;
+  // Raise both fists high overhead.
+  audio.tone(60, 1.2, { type: 'sine', volume: 0.12 });
+  await tween(1.0, (t) => {
+    const e = ease(t);
+    for (const a of r.arms) a.rotation.x = -2.7 * e;
+    r.body.rotation.x = -0.12 * e;
+  });
+  if (!alive(g)) return;
+  await wait(0.25);
+  if (!alive(g)) return;
+  // SMASH.
+  await tween(0.22, (t) => {
+    const e = t * t;
+    for (const a of r.arms) a.rotation.x = -2.7 + 2.15 * e;
+    r.body.rotation.x = -0.12 + 0.42 * e;
+    r.body.position.y = -0.7 * e;
+  });
+  if (!alive(g)) return;
+
+  const c = V(0, 0, 0), f2 = V(0, 0, 0);
+  r.fists[0].getWorldPosition(c);
+  r.fists[1].getWorldPosition(f2);
+  c.add(f2).multiplyScalar(0.5);
+  c.y = H(c.x, c.z);
+  audio.tone(42, 1.4, { type: 'sine', volume: 0.5 });
+  audio.noise(1.2, { volume: 0.4 });
+  shake = 0.35;
+  r.wave.position.copy(c);
+  r.ring.position.set(c.x, c.y + 0.15, c.z);
+  for (let i = 0; i < 60; i++) {
+    const a = Math.random() * 6.28, s = 2 + Math.random() * 5;
+    r.fx.dust.emit(V(c.x, c.y + 0.3, c.z), V(Math.cos(a) * s, 1 + Math.random() * 3, Math.sin(a) * s), 1.6, 0.6);
+    r.fx.rocks.emit(V(c.x, c.y + 0.3, c.z), V(Math.cos(a) * s * 0.8, 5 + Math.random() * 6, Math.sin(a) * s * 0.8), 1.6);
+  }
+
+  // Shockwave rolls outward, setting off explosions as it goes.
+  const booms = [];
+  for (let i = 0; i < 10; i++) booms.push({ a: (i / 10) * 6.28 + Math.random() * 0.4, r: 3 + Math.random() * 9, done: false });
+  booms.sort((x, y) => x.r - y.r);
+  await tween(1.3, (t) => {
+    const rad = 0.5 + easeOut(t) * 15;
+    r.wave.scale.set(rad, 1 + (1 - t) * 1.5, rad);
+    r.wave.material.opacity = 0.45 * (1 - t);
+    r.ring.scale.setScalar(rad);
+    r.ring.material.opacity = 0.8 * (1 - t);
+    for (const b of booms) {
+      if (b.done || b.r > rad) continue;
+      b.done = true;
+      const x = c.x + Math.cos(b.a) * b.r, z = c.z + Math.sin(b.a) * b.r, y = H(x, z);
+      audio.noise(0.3, { volume: 0.18 });
+      shake = Math.max(shake, 0.12);
+      for (let i = 0; i < 28; i++) {
+        const d = V(Math.random() - 0.5, Math.random() * 0.9 + 0.3, Math.random() - 0.5).normalize();
+        r.fx.fire.emit(V(x, y + 0.3, z), d.clone().multiplyScalar(4 + Math.random() * 3), 0.6 + Math.random() * 0.3, 0.45);
+        if (i % 3 === 0) r.fx.flash.emit(V(x, y + 0.5, z), d.clone().multiplyScalar(2.5), 0.35, 0.7);
+        if (i % 2) r.fx.dust.emit(V(x, y + 0.3, z), d.multiplyScalar(2 + Math.random() * 2), 1.4, 0.5);
+        if (i % 4 === 0) r.fx.rocks.emit(V(x, y + 0.3, z), V(d.x * 4, 5 + Math.random() * 4, d.z * 4), 1.3);
+      }
+    }
+  });
+  if (!alive(g)) return;
+  r.wave.material.opacity = r.ring.material.opacity = 0;
+  await tween(0.8, (t) => {
+    const e = ease(t);
+    for (const a of r.arms) a.rotation.x = -0.55 * (1 - e);
+    r.body.rotation.x = 0.3 * (1 - e);
+    r.body.position.y = -0.7 * (1 - e);
+  });
+}
+
+// ===== 5. Water Girl (remembered 0.45) =====
+const POOL_FRAG = `
+  uniform float time; uniform float grow; varying vec2 vUv;
+  void main() {
+    vec2 p = vUv * 2.0 - 1.0;
+    float r = length(p);
+    if (r > grow) discard;
+    float rip = 0.5 + 0.5 * sin(r * 26.0 - time * 5.0);
+    float caustic = pow(0.5 + 0.5 * sin(p.x * 18.0 + time * 1.7) * sin(p.y * 16.0 - time * 1.3), 4.0);
+    vec3 col = mix(vec3(0.05, 0.38, 0.85), vec3(0.45, 0.85, 1.0), r * 0.7 + rip * 0.15);
+    col += vec3(0.9, 1.0, 1.0) * caustic * 0.35;
+    float edge = smoothstep(grow, grow - 0.06, r);
+    col = mix(vec3(1.0), col, edge);
+    gl_FragColor = vec4(col, 0.85);
+    #include <colorspace_fragment>
+  }`;
+
+function buildWaterGirl() {
+  const g = standAt(SPOTS.water);
+  const skin = std(0xffd9c2, { roughness: 0.6 });
+  const water = std(0x4fc3ff, { roughness: 0.1, metalness: 0.1, emissive: 0x1a6aa8, emissiveIntensity: 0.5, transparent: true, opacity: 0.8 });
+  const dressMat = std(0x7fdcff, { roughness: 0.2, emissive: 0x2a8ac8, emissiveIntensity: 0.4, side: THREE.DoubleSide, transparent: true, opacity: 0.85 });
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const iris = new THREE.MeshBasicMaterial({ color: 0x1b5fa8 });
+  const dark = new THREE.MeshBasicMaterial({ color: 0x5a2a2a });
+
+  const fig = new THREE.Group(); // the girl herself (moves during her power)
+  g.add(fig);
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.CapsuleGeometry(0.055, 0.42, 8, 16), skin, sx * 0.08, 0.3, 0, fig);
+    mesh(new THREE.SphereGeometry(0.07, 24, 16), water, sx * 0.08, 0.05, 0.03, fig).scale.set(1, 0.6, 1.4);
+  }
+  const prof = [];
+  for (let i = 0; i <= 20; i++) {
+    const t = i / 20;
+    prof.push(new THREE.Vector2(0.13 + 0.27 * t * t, 1.0 - t * 0.52));
+  }
+  const dress = mesh(new THREE.LatheGeometry(prof, 64), dressMat, 0, 0, 0, fig);
+  mesh(new THREE.CapsuleGeometry(0.12, 0.22, 10, 20), dressMat, 0, 1.08, 0, fig);
+  const arms = [];
+  for (const sx of [-1, 1]) {
+    const arm = new THREE.Group();
+    arm.position.set(sx * 0.16, 1.2, 0);
+    arm.rotation.z = sx * 0.15;
+    fig.add(arm);
+    mesh(new THREE.CapsuleGeometry(0.045, 0.38, 8, 16), skin, 0, -0.22, 0, arm);
+    mesh(new THREE.SphereGeometry(0.055, 16, 12), skin, 0, -0.45, 0, arm);
+    arms.push(arm);
+  }
+  mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.1, 16), skin, 0, 1.3, 0, fig);
+  const head = new THREE.Group();
+  head.position.set(0, 1.45, 0);
+  fig.add(head);
+  mesh(new THREE.SphereGeometry(0.17, 48, 32), skin, 0, 0, 0, head);
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.SphereGeometry(0.045, 20, 16), white, sx * 0.065, 0.01, 0.145, head).scale.z = 0.6;
+    mesh(new THREE.SphereGeometry(0.028, 16, 12), iris, sx * 0.065, 0.005, 0.17, head).scale.z = 0.5;
+  }
+  const smile = mesh(new THREE.TorusGeometry(0.04, 0.008, 8, 16, Math.PI), dark, 0, -0.07, 0.16, head);
+  smile.rotation.z = Math.PI;
+  mesh(new THREE.TorusGeometry(0.17, 0.014, 12, 48), water, 0, 0.06, 0, head).rotation.x = Math.PI / 2 + 0.25;
+  // Hair made of flowing water.
+  const strands = [];
+  for (let i = 0; i < 9; i++) {
+    const a = Math.PI * (0.15 + (0.7 * i) / 8);
+    const pivot = new THREE.Group();
+    pivot.position.set(Math.cos(a) * 0.12, 0.1, -Math.sin(a) * 0.12);
+    head.add(pivot);
+    const len = 0.5 + Math.sin(i * 1.7) * 0.08;
+    const curve = new THREE.CatmullRomCurve3([V(0, 0, 0), V(Math.cos(a) * 0.08, -0.15, -0.08), V(Math.cos(a) * 0.1, -len * 0.6, -0.12), V(Math.cos(a) * 0.06, -len, -0.1)]);
+    mesh(taperTube(curve, 24, 0.045, 0.01, 10), water, 0, 0, 0, pivot);
+    strands.push(pivot);
+  }
+
+  // Her pool (revealed by the `grow` uniform so it can hug the terrain).
+  const poolMat = new THREE.ShaderMaterial({ uniforms: { time: { value: 0 }, grow: { value: 0 } }, vertexShader: GALAXY_VERT, fragmentShader: POOL_FRAG, transparent: true, depthWrite: false });
+  const pool = new THREE.Mesh(new THREE.RingGeometry(0.0001, 3.4, 64, 14).rotateX(-Math.PI / 2), poolMat);
+  pool.visible = false;
+  ctx.scene.add(pool);
+  const splash = new Particles({ count: 900, color: 0xffffff, color2: 0x4fc3ff, size: 0.12, grow: 0.6, gravity: 9.8, drag: 0.3 });
+  const drips = new Particles({ count: 60, color: 0x9fe0ff, size: 0.04, gravity: 6 });
+
+  const wg = {
+    name: 'Water Girl', color: '#5ec8ff', group: g,
+    line: 'Puddles, bathtubs, the seaside... children used to dream about me every summer. Now only sometimes. But watch!',
+    reaction: 'Water\'s my thing too, you know. Well. It was.',
+    ability: (gg) => waterGirlRide(wg, gg),
+    fig, arms, strands, pool, poolMat, splash, posing: false,
+  };
+  wg.fade = makeFadable(g, REMEMBERED.water);
+
+  const hp = V(0, 0, 0);
+  every((dt) => {
+    poolMat.uniforms.time.value = time;
+    strands.forEach((s, i) => { s.rotation.x = Math.sin(time * 2 + i) * 0.12 + (wg.posing ? 0.9 : 0); s.rotation.z = Math.sin(time * 1.7 + i * 0.7) * 0.08; });
+    dress.rotation.y = Math.sin(time * 1.3) * 0.1;
+    if (!wg.posing) {
+      fig.position.y = Math.sin(time * 1.6) * 0.03;
+      arms.forEach((a, i) => { a.rotation.z = (i ? 1 : -1) * (0.15 + Math.sin(time * 1.6) * 0.04); a.rotation.x = 0; });
+    }
+    if (Math.random() < dt * 4) {
+      head.getWorldPosition(hp);
+      drips.emit(V(hp.x + (Math.random() - 0.5) * 0.3, hp.y - 0.3, hp.z + (Math.random() - 0.5) * 0.3), V(0, 0, 0), 0.6);
+    }
+  });
+
+  ctx.interact.add(g, () => meet(wg), { distance: 6 });
+  return wg;
+}
+
+function shapePool(pool, c) {
+  // Make the pool hug the ground around centre c.
+  const pos = pool.geometry.attributes.position;
+  if (!pool.userData.base) pool.userData.base = Float32Array.from(pos.array);
+  const base = pool.userData.base, cy = H(c.x, c.z);
+  for (let i = 0; i < pos.count; i++) {
+    const x = base[i * 3], z = base[i * 3 + 2];
+    pos.setY(i, H(c.x + x, c.z + z) - cy + 0.08);
+  }
+  pos.needsUpdate = true;
+  pool.geometry.computeBoundingSphere();
+  pool.position.set(c.x, cy, c.z);
+}
+
+async function waterGirlRide(w, g) {
+  const { player, audio } = ctx;
+  w.group.updateMatrixWorld(true);
+  const home = w.group.position.clone();
+  const u = V(player.position.x - home.x, 0, player.position.z - home.z).normalize(); // toward player
+  const p = V(-u.z, 0, u.x);                                                        // across the view
+  const C = home.clone().addScaledVector(u, 2).addScaledVector(p, 1.4);
+  shapePool(w.pool, C);
+  w.pool.visible = true;
+  w.posing = true;
+
+  // Raise her arms and the pool spreads out of nowhere.
+  audio.noise(1.2, { volume: 0.12 });
+  await tween(1.0, (t) => {
+    const e = ease(t);
+    w.arms.forEach((a, i) => { a.rotation.z = (i ? 1 : -1) * (0.15 + 2.2 * e); });
+    w.poolMat.uniforms.grow.value = easeOut(t);
+    if (Math.random() < 0.5) {
+      const a = Math.random() * 6.28, r = Math.random() * 3.2 * t;
+      w.splash.emit(V(C.x + Math.cos(a) * r, H(C.x, C.z) + 0.1, C.z + Math.sin(a) * r), V(0, 2 + Math.random() * 2, 0), 0.5);
+    }
+  });
+  if (!alive(g)) return;
+
+  // Local frame: the figure moves inside the group, so work in the group's space.
+  const toLocal = (v) => w.group.worldToLocal(v.clone());
+  const A = C.clone().addScaledVector(p, -2.6), B = C.clone().addScaledVector(p, 2.6);
+  A.y = H(A.x, A.z) + 0.08; B.y = H(B.x, B.z) + 0.08;
+  const startL = w.fig.position.clone(), aL = toLocal(A), bL = toLocal(B);
+  const faceAlong = (dx, dz) => { w.fig.rotation.y = Math.atan2(dx, dz); };
+
+  // Hop into the pool...
+  await tween(0.5, (t) => {
+    w.fig.position.lerpVectors(startL, aL, ease(t));
+    w.fig.position.y += Math.sin(Math.PI * t) * 0.6;
+    faceAlong(aL.x - startL.x, aL.z - startL.z);
+  });
+  if (!alive(g)) return;
+  audio.noise(0.4, { volume: 0.15 });
+  // ...slide across it, arms out...
+  const wp = V(0, 0, 0);
+  await tween(1.3, (t) => {
+    w.fig.position.lerpVectors(aL, bL, ease(t));
+    faceAlong(bL.x - aL.x, bL.z - aL.z);
+    w.fig.rotation.z = Math.sin(t * Math.PI) * 0.15;
+    w.arms.forEach((a, i) => { a.rotation.z = (i ? 1 : -1) * 1.5; });
+    w.fig.getWorldPosition(wp);
+    for (let i = 0; i < 4; i++) {
+      w.splash.emit(V(wp.x + (Math.random() - 0.5) * 0.3, wp.y + 0.05, wp.z + (Math.random() - 0.5) * 0.3),
+        V((Math.random() - 0.5) * 2, 1.5 + Math.random() * 2, (Math.random() - 0.5) * 2), 0.6);
+    }
+  });
+  if (!alive(g)) return;
+  w.fig.rotation.z = 0;
+
+  // ...then a jet of water launches her up and she rides it round in a loop.
+  audio.noise(3.4, { volume: 0.22 });
+  audio.tone(220, 0.6, { type: 'sine', volume: 0.06 });
+  const center = toLocal(C);
+  const ang0 = Math.atan2(bL.z - center.z, bL.x - center.x);
+  const R0 = Math.hypot(bL.x - center.x, bL.z - center.z);
+  let px = bL.x, pz = bL.z, jet = 0;
+  await tween(3.6, (t, dt) => {
+    const ang = ang0 + t * Math.PI * 2.2;
+    const R = R0 * (1 - 0.2 * Math.sin(Math.PI * t));
+    const x = center.x + Math.cos(ang) * R, z = center.z + Math.sin(ang) * R;
+    const ground = bL.y + (startL.y - bL.y) * smooth(0.85, 1, t);
+    const lift = 4 * Math.pow(Math.sin(Math.PI * Math.min(1, t * 1.05)), 0.7);
+    w.fig.position.set(x + (startL.x - x) * smooth(0.85, 1, t), ground + lift, z + (startL.z - z) * smooth(0.85, 1, t));
+    faceAlong(w.fig.position.x - px, w.fig.position.z - pz);
+    px = w.fig.position.x; pz = w.fig.position.z;
+    w.fig.rotation.x = 0.25 * Math.sin(Math.PI * t);
+    w.arms.forEach((a, i) => { a.rotation.z = (i ? 1 : -1) * (1.3 + Math.sin(time * 6) * 0.1); });
+    // The stream of water under her feet.
+    w.fig.getWorldPosition(wp);
+    if (lift > 0.2) {
+      jet += dt * 420;
+      while (jet > 1) {
+        jet--;
+        w.splash.emit(V(wp.x + (Math.random() - 0.5) * 0.15, wp.y + Math.random() * 0.1, wp.z + (Math.random() - 0.5) * 0.15),
+          V((Math.random() - 0.5) * 0.6, -4 - Math.random() * 2, (Math.random() - 0.5) * 0.6), 0.7 + Math.random() * 0.3, 0.2);
+      }
+    }
+  });
+  if (!alive(g)) return;
+  w.fig.position.copy(startL);
+  w.fig.rotation.set(0, 0, 0);
+  w.posing = false;
+  await tween(0.8, (t) => { w.poolMat.uniforms.grow.value = 1 - ease(t); });
+  w.pool.visible = false;
+}
+
+// ===== 6. Tongue Guy (remembered 0.3) =====
+function buildTongueGuy() {
+  const g = standAt(SPOTS.tongue);
+  const skinMat = std(0xb07cff, { roughness: 0.5 });
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const black = new THREE.MeshBasicMaterial({ color: 0x111111 });
+  const mouthMat = new THREE.MeshBasicMaterial({ color: 0x4a0a1a });
+  const tongueMat = std(0xff2f6e, { roughness: 0.35, emissive: 0xa01040, emissiveIntensity: 0.5 });
+  tongueMat.userData.k = 1.8; // stays readable as a tongue even though he's faded
+
+  const body = new THREE.Group();
+  g.add(body);
+  mesh(new THREE.SphereGeometry(0.8, 64, 48), skinMat, 0, 0.95, 0, body).scale.set(1, 0.95, 0.92);
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.SphereGeometry(0.2, 32, 24), skinMat, sx * 0.35, 0.14, 0.1, body).scale.set(1, 0.6, 1.3);
+    const arm = mesh(new THREE.CapsuleGeometry(0.08, 0.35, 10, 20), skinMat, sx * 0.85, 0.9, 0.05, body);
+    arm.rotation.z = sx * 0.9;
+    // Big googly eyes on top.
+    mesh(new THREE.SphereGeometry(0.22, 32, 24), white, sx * 0.25, 1.72, 0.35, body);
+    mesh(new THREE.SphereGeometry(0.1, 24, 16), black, sx * 0.25, 1.7, 0.55, body);
+    mesh(new THREE.SphereGeometry(0.06, 16, 12), skinMat, sx * 0.25, 1.98, 0.3, body).scale.set(1.6, 0.4, 0.8);
+  }
+  for (let i = 0; i < 3; i++) mesh(new THREE.SphereGeometry(0.08, 16, 12), skinMat, (i - 1) * 0.1, 1.82, -0.1, body);
+  const mouth = mesh(new THREE.SphereGeometry(1, 48, 24), mouthMat, 0, 0.9, 0.7, body);
+  mouth.scale.set(0.38, 0.2, 0.1);
+  const mouthPt = new THREE.Object3D();
+  mouthPt.position.set(0, 0.86, 0.78);
+  body.add(mouthPt);
+  const lip = mesh(new THREE.SphereGeometry(1, 32, 16), tongueMat, 0, 0.82, 0.8, body); // tongue tip resting on the lip
+  lip.scale.set(0.16, 0.06, 0.12);
+
+  // The super-long tongue lives in world space (it's rebuilt as it stretches).
+  const tongueRoot = new THREE.Group();
+  ctx.scene.add(tongueRoot);
+  const tongue = new THREE.Mesh(new THREE.BufferGeometry(), tongueMat);
+  tongue.frustumCulled = false;
+  tongueRoot.add(tongue);
+  const tip = mesh(new THREE.SphereGeometry(0.2, 32, 16), tongueMat, 0, 0, 0, tongueRoot);
+  tip.scale.set(1, 0.6, 1.3);
+  tongueRoot.visible = false;
+
+  const tg = {
+    name: 'Tongue Guy', color: '#c7a0ff', group: g,
+    line: 'Kids used to stick their tongues out at each other all day long. They\'ve mostly forgotten me now... but I\'ve still got reach!',
+    reaction: 'Huh. I didn\'t know he could still do that.',
+    ability: (gg) => tongueStretch(tg, gg),
+    body, mouthPt, lip, tongue, tip, tongueRoot,
+  };
+  tg.fade = makeFadable(g, REMEMBERED.tongue);
+  tg.tongueFade = makeFadable(tongueRoot, REMEMBERED.tongue);
+
+  every(() => {
+    body.scale.set(1 + Math.sin(time * 2) * 0.02, 1 - Math.sin(time * 2) * 0.02, 1);
+    body.rotation.z = Math.sin(time * 1.3) * 0.04;
+  });
+
+  ctx.interact.add(g, () => meet(tg), { distance: 6 });
+  return tg;
+}
+
+async function tongueStretch(tg, g) {
+  const { player, audio } = ctx;
+  const m0 = V(0, 0, 0);
+  tg.mouthPt.getWorldPosition(m0);
+  // Shoot it across the view (perpendicular to the player), whichever way has more room.
+  const home = tg.group.position;
+  const u = V(player.position.x - home.x, 0, player.position.z - home.z).normalize();
+  let dir = V(-u.z, 0, u.x);
+  if (dir.x * -home.x + dir.z * -home.z < 0) dir.negate();
+  const perp = V(-dir.z, 0, dir.x);
+  let L = 0;
+  while (L < 46) {
+    const x = home.x + dir.x * (L + 1), z = home.z + dir.z * (L + 1);
+    if (Math.hypot(x, z) > PLAY_R - 3) break;
+    L += 1;
+  }
+  const at = (s, out) => {
+    const x = m0.x + dir.x * s + perp.x * Math.sin(s * 0.22) * 1.6 * smooth(0, 6, s);
+    const z = m0.z + dir.z * s + perp.z * Math.sin(s * 0.22) * 1.6 * smooth(0, 6, s);
+    const y = m0.y + (H(x, z) + 1.1 - m0.y) * smooth(0, 4, s);
+    return out.set(x, y, z);
+  };
+
+  // Turn to face along the tongue's path.
+  const r0 = tg.group.rotation.y, r1 = Math.atan2(dir.x, dir.z);
+  await tween(0.4, (t) => { tg.group.rotation.y = lerpAngle(r0, r1, ease(t)); });
+  if (!alive(g)) return;
+  tg.group.updateMatrixWorld(true);
+  tg.mouthPt.getWorldPosition(m0);
+  tg.lip.visible = false;
+  tg.tongueRoot.visible = true;
+
+  const build = (len, wiggle) => {
+    const n = Math.max(4, Math.ceil(len / 1.5));
+    const pts = [];
+    for (let i = 0; i <= n; i++) {
+      const p = at((i / n) * len, V(0, 0, 0));
+      p.y += Math.sin(i * 0.9 - time * 8) * wiggle * (i / n);
+      pts.push(p);
+    }
+    const curve = new THREE.CatmullRomCurve3(pts);
+    tg.tongue.geometry.dispose();
+    tg.tongue.geometry = new THREE.TubeGeometry(curve, Math.max(16, n * 6), 0.13, 14);
+    tg.tip.position.copy(pts[pts.length - 1]);
+  };
+
+  [260, 330, 420, 520].forEach((f, i) => setTimeout(() => alive(g) && audio.tone(f, 0.2, { type: 'triangle', volume: 0.07 }), i * 220));
+  await tween(1.7, (t) => build(Math.max(0.3, L * easeOut(t)), 0.15));
+  if (!alive(g)) return;
+  await tween(1.4, () => build(L, 0.5)); // waggle it at the far end
+  if (!alive(g)) return;
+  audio.noise(0.6, { volume: 0.12 });
+  [520, 400, 300, 220].forEach((f, i) => setTimeout(() => alive(g) && audio.tone(f, 0.18, { type: 'triangle', volume: 0.07 }), i * 180));
+  await tween(1.0, (t) => build(Math.max(0.3, L * (1 - ease(t))), 0.15));
+  if (!alive(g)) return;
+  tg.tongueRoot.visible = false;
+  tg.lip.visible = true;
+  await faceToward(tg.group, player.position, 0.4);
+}
+
 // ---------- scene ----------
 export default {
   name: NAME,
@@ -1608,7 +2134,7 @@ export default {
     ctx = c;
     gen++;
     tasks = []; systems = []; fadables = []; pathPts = []; pathEnds = []; props = [[0, 0, 6], ...Object.values(SPOTS).map(([x, z]) => [x, z, 5])];
-    time = 0; state = 'intro'; busy = false;
+    time = 0; state = 'intro'; busy = false; shake = 0;
     rand = mulberry32(7);
     pxScale = (window.innerHeight * Math.min(window.devicePixelRatio, 2)) / (2 * Math.tan(THREE.MathUtils.degToRad(ctx.camera.fov / 2)));
 
@@ -1616,6 +2142,9 @@ export default {
     buildKangaroo();
     buildInfernal();
     buildKite();
+    buildRockGuardian();
+    buildWaterGirl();
+    buildTongueGuy();
     hydrant = buildHydrant();
 
     // TEMP exit until the masked figure (§9) is built: end of the north path.
@@ -1640,6 +2169,12 @@ export default {
     for (const s of systems) s.update(dt);
     updateHydrant(dt);
     updateFades();
+    // Camera shake rides on top of wherever the player put the camera this frame.
+    if (shake > 0) {
+      const c = ctx.camera.position;
+      c.x += (Math.random() - 0.5) * shake; c.y += (Math.random() - 0.5) * shake; c.z += (Math.random() - 0.5) * shake;
+      shake = Math.max(0, shake - dt * 0.35);
+    }
   },
 
   dispose() {
