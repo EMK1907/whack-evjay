@@ -62,6 +62,8 @@ The environment should have a dark red atmosphere.
 
 Buildings and structures are upside down, and the player is effectively standing on what would normally be the ceiling of the world.
 
+The inverted world is an upside-down London at night: old brick and white-stucco terraced streets, red telephone boxes, red double-decker buses, black taxis, London street signs and Underground roundels, with London landmarks around the city — The Shard, the London Eye, Elizabeth Tower (Big Ben) and The Gherkin. It includes a modern glass Marshall Wace building with its name lit up in large letters on the facade.
+
 The player can explore this environment.
 
 ## 5. The Golden Pressure Plate — Flipping Gravity

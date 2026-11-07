@@ -268,7 +268,7 @@ function makeMaterials(tex, rand) {
   const std = (maps, o) => new THREE.MeshStandardMaterial({ envMapIntensity: 0.3, ...(maps || {}), ...o });
   const [skyMap, skyEmissive] = modernFacade(rand);
   const [skyMap2, skyEmissive2] = modernFacade(rand);
-  return {
+  const M = {
     brick: std(tex.brick, { color: 0xa8968c, roughness: 1 }),
     plaster: ['#c8b496', '#b99c8a', '#a6a496', '#c09c80'].map((c) => std(tex.plaster, { color: c, roughness: 1 })),
     stone: std(tex.pavers, { color: 0xb3a99c, roughness: 1 }),
@@ -277,7 +277,8 @@ function makeMaterials(tex, rand) {
     shutter: std(tex.shutter, { color: 0x9a8c80, roughness: 1 }),
     iron: std(tex.metal, { color: 0x34302e, metalness: 0.55, roughness: 0.85 }),
     hydrant: std(tex.metal, { color: 0xc23a2a, metalness: 0.35, roughness: 0.9 }),
-    paint: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.65 }),
+    paint: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.65, envMapIntensity: 0.3 }),
+    carPaint: new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.28, metalness: 0.35, envMapIntensity: 0.35 }),
     // Low env reflection: the HDRI's own (bright) street lamps would otherwise glare in every pane.
     glass: new THREE.MeshStandardMaterial({ color: 0x0b0e13, roughness: 0.2, metalness: 0.2, envMapIntensity: 0.22 }),
     glassLit: new THREE.MeshBasicMaterial({ vertexColors: true }),
@@ -289,12 +290,20 @@ function makeMaterials(tex, rand) {
       new THREE.MeshStandardMaterial({ map: skyMap2, emissiveMap: skyEmissive2, emissive: 0xffffff, emissiveIntensity: 0.8, roughness: 0.25, metalness: 0.6, envMapIntensity: 0.6 }),
     ],
     concrete: new THREE.MeshStandardMaterial({ color: 0x3a3836, roughness: 0.9 }),
+    // Georgian white stucco: smooth painted render (only a hint of the plaster relief, no peeling colour map).
+    stucco: new THREE.MeshStandardMaterial({ color: 0xf2ede2, roughness: 0.85, envMapIntensity: 0.3, normalMap: tex.plaster?.normalMap || null, normalScale: new THREE.Vector2(0.25, 0.25) }),
+    sandstone: std(tex.pavers, { color: 0xd8bd86, roughness: 1 }),      // Elizabeth Tower
+    gold: new THREE.MeshStandardMaterial({ color: 0xc9a13a, metalness: 1, roughness: 0.3, envMapIntensity: 0.5 }),
+    rubber: new THREE.MeshStandardMaterial({ color: 0x111112, roughness: 0.9 }),
+    signs: new THREE.MeshStandardMaterial({ map: streetSignAtlas(), roughness: 0.6, envMapIntensity: 0.3, emissive: 0xffffff, emissiveIntensity: 0.12 }),
     puddle: new THREE.MeshStandardMaterial({
       // The scene's lamps give the puddles their highlights; no HDRI reflection (its own lamps are far too bright).
       color: 0x050303, roughness: 0.1, metalness: 0, envMapIntensity: 0, alphaMap: puddleAtlas(rand),
       transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
     }),
   };
+  M.signs.emissiveMap = M.signs.map; // street plates catch a little light at night
+  return M;
 }
 
 // ---------- old houses ----------
@@ -322,9 +331,9 @@ function houseKit(B, rand) {
   };
 
   /** Window centred at face-local (x, y) on a face whose matrix maps local +Z to the outward normal. */
-  function windowAt(face, x, y, litChance) {
+  function windowAt(face, x, y, litChance, frameColor = null) {
     const at = (gx, gy, gz) => face.clone().multiply(mat(x + gx, y + gy, gz));
-    const frame = pick(rand, FRAME_COLORS);
+    const frame = frameColor || pick(rand, FRAME_COLORS);
     if (rand() < litChance) B.glassLit.add(G.glass, at(0, 0, 0.0), new THREE.Color(...pick(rand, LIT_COLORS)).multiplyScalar(0.35 + rand() * 0.5));
     else B.glass.add(G.glass, at(0, 0, 0.0));
     B.paint.add(G.frameH, at(0, 0.765, 0.04), frame);
@@ -386,32 +395,49 @@ function addRoof(B, wallBatch, M0, span, len, rh) {
   }
 }
 
-/** One old 2–4 storey house: walls, plinth, cornice, roof, chimneys, windows/doors on street faces. */
-function addHouse(B, kit, rand, parent, colliders, cx, cz, w, d, lotX, lotZ) {
+/**
+ * One house: walls, plinth, cornice, roof, chimneys, windows/doors on street faces.
+ * style 'old': 2–4 storey brick/plaster with a tiled gable roof. style 'georgian': London white-stucco
+ * terrace house, 3–4 storeys, flat roof behind a parapet, columned porch, railings, white sash frames.
+ */
+function addHouse(B, kit, rand, parent, colliders, cx, cz, w, d, lotX, lotZ, style = 'old') {
   const base = KERB_H;
-  const floors = 2 + Math.floor(rand() * 3);
+  const georgian = style === 'georgian';
+  const floors = georgian ? 3 + (rand() < 0.5 ? 1 : 0) : 2 + Math.floor(rand() * 3);
   const wallH = 0.6 + floors * FLOOR_H;
   const brick = rand() < 0.4;
-  const wallBatch = brick ? B.brick : pick(rand, B.plaster);
-  const wallTile = brick ? [2, 2] : [2.5, 2.5];
+  const wallBatch = georgian ? B.stucco : brick ? B.brick : pick(rand, B.plaster);
+  const wallTile = brick && !georgian ? [2, 2] : [2.5, 2.5];
+  const frameColor = georgian ? new THREE.Color('#f2efe6') : null;
 
   wallBatch.add(boxGeometry(w, wallH, d, wallTile), mat(cx, base + wallH / 2, cz));
   B.stone.add(boxGeometry(w + 0.08, 0.6, d + 0.08, [2, 2]), mat(cx, base + 0.3, cz));                      // plinth
   B.stone.add(boxGeometry(w + 0.1, 0.12, d + 0.1, [2, 2]), mat(cx, base + 0.6 + FLOOR_H, cz));              // string course
   B.stone.add(boxGeometry(w + 0.3, 0.22, d + 0.3, [2, 2]), mat(cx, base + wallH - 0.05, cz));               // cornice
 
-  // Roof: ridge along the longer side; keep everything under MAX_TOP.
-  const alongZ = d >= w;
-  const span = alongZ ? w : d, len = alongZ ? d : w;
-  const roofBase = base + wallH + 0.06;
-  const rh = Math.min((span / 2) * Math.tan(0.6 + rand() * 0.25), MAX_TOP - 2 - roofBase);
-  const M0 = mat(cx, roofBase, cz, alongZ ? 0 : Math.PI / 2);
-  addRoof(B, wallBatch, M0, span, len, rh);
-  for (let i = 0; i < 1 + (rand() < 0.5 ? 1 : 0); i++) { // chimneys poke through the slope
-    const lx = (rand() < 0.5 ? -1 : 1) * span * 0.18, lz = (rand() - 0.5) * len * 0.6;
-    const h = rh + 0.6 + rand() * 0.8;
-    B.brick.add(boxGeometry(0.55, h, 0.55, [2, 2]), M0.clone().multiply(mat(lx, h / 2, lz)));
-    B.stone.add(boxGeometry(0.7, 0.1, 0.7, [2, 2]), M0.clone().multiply(mat(lx, h + 0.05, lz)));
+  let rh;
+  if (georgian) {
+    // Flat roof hidden behind a stucco parapet, with a brick chimney stack and pots on the party wall.
+    rh = 0.8;
+    B.stucco.add(boxGeometry(w + 0.02, 0.8, d + 0.02, [2.5, 2.5]), mat(cx, base + wallH + 0.4, cz));
+    B.stone.add(boxGeometry(w + 0.12, 0.1, d + 0.12, [2, 2]), mat(cx, base + wallH + 0.85, cz));
+    const sx = cx + (w <= d ? w / 2 - 0.3 : 0), sz = cz + (w <= d ? 0 : d / 2 - 0.3);
+    B.brick.add(boxGeometry(w <= d ? 0.5 : 1.4, 1.3, w <= d ? 1.4 : 0.5, [2, 2]), mat(sx, base + wallH + 1.45, sz));
+    for (const k of [-0.4, 0, 0.4]) B.roof.add(new THREE.CylinderGeometry(0.1, 0.12, 0.4, 8), mat(sx + (w <= d ? 0 : k), base + wallH + 2.3, sz + (w <= d ? k : 0)));
+  } else {
+    // Roof: ridge along the longer side; keep everything under MAX_TOP.
+    const alongZ = d >= w;
+    const span = alongZ ? w : d, len = alongZ ? d : w;
+    const roofBase = base + wallH + 0.06;
+    rh = Math.min((span / 2) * Math.tan(0.6 + rand() * 0.25), MAX_TOP - 2 - roofBase);
+    const M0 = mat(cx, roofBase, cz, alongZ ? 0 : Math.PI / 2);
+    addRoof(B, wallBatch, M0, span, len, rh);
+    for (let i = 0; i < 1 + (rand() < 0.5 ? 1 : 0); i++) { // chimneys poke through the slope
+      const lx = (rand() < 0.5 ? -1 : 1) * span * 0.18, lz = (rand() - 0.5) * len * 0.6;
+      const h = rh + 0.6 + rand() * 0.8;
+      B.brick.add(boxGeometry(0.55, h, 0.55, [2, 2]), M0.clone().multiply(mat(lx, h / 2, lz)));
+      B.stone.add(boxGeometry(0.7, 0.1, 0.7, [2, 2]), M0.clone().multiply(mat(lx, h + 0.05, lz)));
+    }
   }
   colliderBox(parent, colliders, w, wallH + rh, d, cx, base + (wallH + rh) / 2, cz);
 
@@ -422,6 +448,7 @@ function addHouse(B, kit, rand, parent, colliders, cx, cz, w, d, lotX, lotZ) {
     { n: [0, 1], at: cz + d / 2, edge: lotZ + BUILD_HALF, width: w, ox: cx, oz: cz + d / 2 },
     { n: [0, -1], at: cz - d / 2, edge: lotZ - BUILD_HALF, width: w, ox: cx, oz: cz - d / 2 },
   ].filter((f) => Math.abs(f.at - f.edge) < 0.01);
+  if (georgian) faces.sort((a, b) => a.width - b.width); // front door on the narrow terrace front
   let doorDone = false;
   for (const f of faces) {
     const face = mat(f.ox, 0, f.oz, Math.atan2(f.n[0], f.n[1]));
@@ -429,7 +456,13 @@ function addHouse(B, kit, rand, parent, colliders, cx, cz, w, d, lotX, lotZ) {
     const xs = Array.from({ length: slots }, (_, i) => (i + 0.5) * (f.width / slots) - f.width / 2);
     // Ground floor: a door (one per house), sometimes a garage shutter, otherwise windows.
     let used = [];
-    if (!doorDone) {
+    if (!doorDone && georgian) {
+      const dx = xs[Math.floor(slots / 2)];
+      georgianDoor(B, face, dx, base);
+      railings(B, face, f.width, dx, base);
+      used = [[dx - 0.9, dx + 0.9]];
+      doorDone = true;
+    } else if (!doorDone) {
       if (f.width >= 4 && rand() < 0.3) {
         kit.garageAt(face, -f.width / 2 + 1.7, base);
         kit.doorAt(face, f.width / 2 - 0.9, base);
@@ -442,10 +475,10 @@ function addHouse(B, kit, rand, parent, colliders, cx, cz, w, d, lotX, lotZ) {
       doorDone = true;
     }
     for (const x of xs) {
-      if (!used.some(([a, b]) => x + 0.6 > a && x - 0.6 < b)) kit.windowAt(face, x, base + 0.6 + 1.55, 0.18);
+      if (!used.some(([a, b]) => x + 0.6 > a && x - 0.6 < b)) kit.windowAt(face, x, base + 0.6 + 1.55, 0.18, frameColor);
     }
     for (let fl = 1; fl < floors; fl++) {
-      for (const x of xs) kit.windowAt(face, x, base + 0.6 + fl * FLOOR_H + 1.55, 0.3);
+      for (const x of xs) kit.windowAt(face, x, base + 0.6 + fl * FLOOR_H + 1.55, 0.3, frameColor);
     }
   }
 }
@@ -562,6 +595,484 @@ function makeHydrantProp(M) {
   return g;
 }
 
+// ---------- London ----------
+//
+// Landmarks (scaled to fit under MAX_TOP) sit on their own lots; street details are merged into the
+// shared batches. Text is drawn crisply on canvases and made HDR-bright so it blooms softly.
+
+const LANDMARKS = {
+  marshallWace: [-8, -8],   // right in front of the start view
+  shard: [24, -24],
+  gherkin: [-24, -40],
+  bigBen: [-40, 8],
+  londonEye: [40, 40],
+};
+const landmarkAt = (lx, lz) => Object.keys(LANDMARKS).find((k) => LANDMARKS[k][0] === lx && LANDMARKS[k][1] === lz);
+const LONDON_RED = new THREE.Color('#c8102e');
+const TAXI_BLACK = new THREE.Color('#0b0b0d');
+const lit = (r, g, b) => new THREE.Color(r, g, b); // HDR colours for the unlit glow batch
+
+function textTexture(text, { w = 2048, h = 256, size = 168, weight = 700, color = '#ffffff', spacing = 16 } = {}) {
+  const c = makeCanvas(w, h), g = c.getContext('2d');
+  g.font = `${weight} ${size}px "Helvetica Neue", Helvetica, Arial, sans-serif`;
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = color;
+  if ('letterSpacing' in g) g.letterSpacing = `${spacing}px`;
+  g.fillText(text, w / 2, h / 2 + size * 0.04);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+/** Cylinder between two points (for frames, legs, spokes). */
+function cylinderBetween(a, b, r, segs = 8) {
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const geo = new THREE.CylinderGeometry(r, r, dir.length(), segs);
+  geo.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize()));
+  geo.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+  return geo;
+}
+
+// ----- Marshall Wace: modern glass office with illuminated lettering -----
+
+function addMarshallWace(B, TB, parent, colliders, lx, lz) {
+  const w = 9, d = 9, h = 19.5, y0 = KERB_H;
+  const body = boxGeometry(w, h, d, [8, 16]);
+  TB.facades[0].add(boxFaces(body, SIDES), mat(lx, y0 + h / 2, lz));
+  TB.concrete.add(boxFaces(body, CAPS), mat(lx, y0 + h / 2, lz));
+  // Double-height lit lobby and a canopy on the two street fronts.
+  B.glassLit.add(new THREE.BoxGeometry(w - 0.6, 3.4, 0.04), mat(lx, y0 + 1.9, lz + d / 2 + 0.03), lit(0.17, 0.14, 0.1));
+  B.glassLit.add(new THREE.BoxGeometry(0.04, 3.4, d - 0.6), mat(lx + w / 2 + 0.03, y0 + 1.9, lz), lit(0.17, 0.14, 0.1));
+  TB.concrete.add(boxGeometry(w + 0.6, 0.2, 1.4, [4, 4]), mat(lx, y0 + 3.8, lz + d / 2 + 0.6));
+  TB.concrete.add(boxGeometry(4, 1.2, 3, [4, 4]), mat(lx - 1.5, y0 + h + 0.6, lz - 2));        // rooftop plant
+  // Dark sign bands behind the lettering, for contrast.
+  TB.concrete.add(boxGeometry(8.8, 1.5, 0.12, [4, 4]), mat(lx, y0 + h - 1.7, lz + d / 2 + 0.06));
+  TB.concrete.add(boxGeometry(0.12, 1.5, 8.8, [4, 4]), mat(lx + w / 2 + 0.06, y0 + h - 1.7, lz));
+  TB.concrete.add(boxGeometry(9, 0.1, 1.6, [4, 4]), mat(lx, y0 + h + 0.05, lz + 1.6));
+
+  const signMat = new THREE.MeshBasicMaterial({
+    map: textTexture('MARSHALL WACE'), color: new THREE.Color(2.4, 2.3, 2.15), transparent: true, depthWrite: false,
+  });
+  const sign = (width, x, y, z, rx, ry, order = 'XYZ') => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(width, width / 8), signMat);
+    m.position.set(x, y, z);
+    m.rotation.set(rx, ry, 0, order);
+    m.renderOrder = 3;
+    m.userData.noSSAO = true;
+    parent.add(m);
+  };
+  sign(8.2, lx, y0 + h - 1.7, lz + d / 2 + 0.13, 0, 0);                  // faces +z, the street toward the start
+  sign(8.2, lx + w / 2 + 0.13, y0 + h - 1.7, lz, 0, Math.PI / 2);        // faces +x
+  // On the roof, facing the ceiling: oriented so it reads the right way round for the upside-down player
+  // (their screen-right is world −x and screen-up world +z when facing the start direction).
+  sign(8.6, lx, y0 + h + 0.12, lz + 1.6, -Math.PI / 2, Math.PI, 'YXZ');
+  colliderBox(parent, colliders, w, h, d, lx, y0 + h / 2, lz);
+}
+
+// ----- The Shard: tapering faceted glass pyramid with splinters at the top -----
+
+function shardTextures(rand) {
+  const W = 256, H = 1024, c = makeCanvas(W, H), e = makeCanvas(W, H);
+  const g = c.getContext('2d'), ge = e.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#9fb0c2');
+  grad.addColorStop(1, '#5b6a7a');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, W, H);
+  ge.fillStyle = '#000';
+  ge.fillRect(0, 0, W, H);
+  for (let y = 0; y < H; y += 12) {
+    g.fillStyle = 'rgba(30,40,52,0.6)';
+    g.fillRect(0, y, W, 2);
+    for (let x = 0; x < W; x += 8) {
+      if (rand() < 0.12) {
+        const col = rand() < 0.75 ? '#ffd9a0' : '#cfe0ff';
+        g.fillStyle = col;
+        g.fillRect(x + 1, y + 3, 6, 7);
+        ge.fillStyle = col;
+        ge.fillRect(x + 1, y + 3, 6, 7);
+      }
+    }
+  }
+  const t1 = toTexture(c), t2 = toTexture(e);
+  t1.repeat.set(4, 1);
+  t2.repeat.set(4, 1);
+  return [t1, t2];
+}
+
+function addShard(parent, colliders, lx, lz, rand) {
+  const y0 = KERB_H, H = MAX_TOP - y0 - 1.5;
+  const [map, emissiveMap] = shardTextures(rand);
+  const glass = new THREE.MeshStandardMaterial({
+    map, emissiveMap, emissive: 0xffffff, emissiveIntensity: 0.9, color: 0xb0bcc8, metalness: 0.85, roughness: 0.12, envMapIntensity: 0.7,
+  });
+  const geo = new THREE.CylinderGeometry(0.4, 4.4, H, 8, 1, false);
+  geo.translate(0, H / 2, 0);
+  const body = new THREE.Mesh(geo, glass);
+  body.position.set(lx, y0, lz);
+  body.rotation.y = Math.PI / 8;
+  body.castShadow = body.receiveShadow = true;
+  parent.add(body);
+  // Splinters: the glass "shards" that run past the summit without meeting.
+  const parts = [];
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * TAU + 0.3;
+    const p = new THREE.BoxGeometry(1.0, 2.0, 0.05);
+    p.rotateX(-0.12);
+    p.rotateY(-a + Math.PI / 2);
+    p.translate(Math.cos(a) * 0.35, H + 0.25, Math.sin(a) * 0.35);
+    parts.push(p);
+  }
+  const splinters = new THREE.Mesh(mergeGeometries(parts), glass);
+  splinters.position.set(lx, y0, lz);
+  parent.add(splinters);
+  colliderBox(parent, colliders, 7, 6, 7, lx, y0 + 3, lz);
+  colliderBox(parent, colliders, 4, H - 6, 4, lx, y0 + 6 + (H - 6) / 2, lz);
+}
+
+// ----- The Gherkin: curved bullet with a diagonal diagrid and dark spiral bands -----
+
+function gherkinTextures(rand) {
+  const W = 512, H = 1024, c = makeCanvas(W, H), e = makeCanvas(W, H);
+  const g = c.getContext('2d'), ge = e.getContext('2d');
+  g.fillStyle = '#2b4450';
+  g.fillRect(0, 0, W, H);
+  ge.fillStyle = '#000';
+  ge.fillRect(0, 0, W, H);
+  const step = W / 16;
+  const diag = (ctx, x0, dir, width, style) => {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = width;
+    for (const off of [-W, 0, W]) {
+      ctx.beginPath();
+      ctx.moveTo(x0 + off, H);
+      ctx.lineTo(x0 + off + dir * H * 0.9, 0);
+      ctx.stroke();
+    }
+  };
+  for (let i = 0; i < 6; i++) diag(g, (i / 6) * W, 1, step * 0.9, '#13232b');           // dark spiral bands
+  for (let x = 0; x < W; x += step) { diag(g, x, 1, 2, '#9fb3bb'); diag(g, x, -1, 2, '#9fb3bb'); } // diagrid
+  for (let i = 0; i < 260; i++) { // lit panes
+    const x = rand() * W, y = rand() * H;
+    ge.fillStyle = g.fillStyle = rand() < 0.8 ? '#ffd7a0' : '#d8e8ff';
+    g.fillRect(x, y, 5, 4);
+    ge.fillRect(x, y, 5, 4);
+  }
+  return [toTexture(c), toTexture(e)];
+}
+
+function addGherkin(parent, colliders, lx, lz, rand) {
+  const H = 17, y0 = KERB_H;
+  const pts = [];
+  for (let i = 0; i <= 32; i++) {
+    const t = i / 32;
+    pts.push(new THREE.Vector2(Math.max(0.02, 4.1 * Math.pow(Math.sin(Math.PI * (0.22 + 0.78 * t)), 0.72)), t * H));
+  }
+  const [map, emissiveMap] = gherkinTextures(rand);
+  const glass = new THREE.MeshStandardMaterial({
+    map, emissiveMap, emissive: 0xffffff, emissiveIntensity: 0.8, metalness: 0.6, roughness: 0.22, envMapIntensity: 0.3,
+  });
+  const body = new THREE.Mesh(new THREE.LatheGeometry(pts, 64), glass);
+  body.position.set(lx, y0, lz);
+  body.castShadow = body.receiveShadow = true;
+  parent.add(body);
+  colliderBox(parent, colliders, 6, H, 6, lx, y0 + H / 2, lz);
+}
+
+// ----- Elizabeth Tower (Big Ben): gothic stone tower, lit clock faces, spire -----
+
+function clockTexture() {
+  const S = 512, c = makeCanvas(S, S), g = c.getContext('2d'), r = S / 2;
+  const grad = g.createRadialGradient(r, r, 0, r, r, r);
+  grad.addColorStop(0, '#fff8e6');
+  grad.addColorStop(1, '#f1ddb0');
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(r, r, r - 4, 0, TAU); g.fill();
+  g.strokeStyle = '#1a1410';
+  g.lineWidth = 10;
+  g.beginPath(); g.arc(r, r, r - 10, 0, TAU); g.stroke();
+  g.fillStyle = '#1a1410';
+  g.font = '700 46px Georgia, "Times New Roman", serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  const numerals = ['XII', 'I', 'II', 'III', 'IIII', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI'];
+  for (let i = 0; i < 60; i++) {
+    const a = (i / 60) * TAU - Math.PI / 2, big = i % 5 === 0;
+    g.lineWidth = big ? 6 : 2;
+    g.beginPath();
+    g.moveTo(r + Math.cos(a) * (r - 22), r + Math.sin(a) * (r - 22));
+    g.lineTo(r + Math.cos(a) * (r - (big ? 44 : 32)), r + Math.sin(a) * (r - (big ? 44 : 32)));
+    g.stroke();
+    if (big) g.fillText(numerals[i / 5], r + Math.cos(a) * (r - 84), r + Math.sin(a) * (r - 84));
+  }
+  const hand = (frac, len, width) => {
+    const a = frac * TAU - Math.PI / 2;
+    g.lineWidth = width;
+    g.lineCap = 'round';
+    g.beginPath(); g.moveTo(r, r); g.lineTo(r + Math.cos(a) * len, r + Math.sin(a) * len); g.stroke();
+  };
+  hand(10.15 / 12, r * 0.5, 14); // ~10:10
+  hand(10 / 60, r * 0.78, 9);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+function addBigBen(B, parent, colliders, lx, lz) {
+  const y0 = KERB_H;
+  const add = (batch, geo, x, y, z, yaw = 0, color) => batch.add(geo, mat(lx + x, y0 + y, lz + z, yaw), color);
+  // Shaft with corner buttresses, recessed lancet windows (some lit).
+  add(B.sandstone, boxGeometry(3.2, 11, 3.2, [2, 2]), 0, 5.5, 0);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(B.sandstone, boxGeometry(0.4, 11.2, 0.4, [2, 2]), sx * 1.6, 5.6, sz * 1.6);
+  for (let k = 0; k < 4; k++) {
+    const yaw = (k * Math.PI) / 2, nx = Math.sin(yaw), nz = Math.cos(yaw);
+    for (let lvl = 0; lvl < 4; lvl++) {
+      for (const off of [-0.6, 0, 0.6]) {
+        const x = nx * 1.61 + Math.cos(yaw) * off, z = nz * 1.61 - Math.sin(yaw) * off;
+        if ((lvl + k) % 3 === 0) add(B.glassLit, new THREE.BoxGeometry(0.22, 1.3, 0.02), x, 2.5 + lvl * 2.2, z, yaw, lit(1.3, 0.85, 0.4));
+        else add(B.glass, new THREE.BoxGeometry(0.22, 1.3, 0.02), x, 2.5 + lvl * 2.2, z, yaw);
+      }
+    }
+  }
+  // Clock stage with four lit faces and gilded surrounds.
+  add(B.sandstone, boxGeometry(3.9, 3.8, 3.9, [2, 2]), 0, 12.9, 0);
+  const faceMat = new THREE.MeshBasicMaterial({ map: clockTexture(), color: new THREE.Color(1.9, 1.75, 1.4) });
+  const faceGeo = new THREE.CircleGeometry(1.5, 48);
+  for (let k = 0; k < 4; k++) {
+    const yaw = (k * Math.PI) / 2, nx = Math.sin(yaw), nz = Math.cos(yaw);
+    const f = new THREE.Mesh(faceGeo, faceMat);
+    f.position.set(lx + nx * 1.97, y0 + 12.9, lz + nz * 1.97);
+    f.rotation.y = yaw;
+    f.userData.noSSAO = true;
+    parent.add(f);
+    add(B.gold, new THREE.TorusGeometry(1.55, 0.08, 8, 48), nx * 1.98, 12.9, nz * 1.98, yaw);
+    add(B.gold, boxGeometry(3.4, 0.16, 0.1, [1, 1]), nx * 1.99, 14.65, nz * 1.99, yaw);
+  }
+  // Belfry with dark arches, then the steep pyramidal roof, pinnacles and spire.
+  add(B.sandstone, boxGeometry(3.4, 2.4, 3.4, [2, 2]), 0, 16.0, 0);
+  for (let k = 0; k < 4; k++) {
+    const yaw = (k * Math.PI) / 2;
+    for (const off of [-0.8, 0, 0.8]) add(B.glass, new THREE.BoxGeometry(0.45, 1.6, 0.02), Math.sin(yaw) * 1.71 + Math.cos(yaw) * off, 16, Math.cos(yaw) * 1.71 - Math.sin(yaw) * off, yaw);
+  }
+  const roof = new THREE.ConeGeometry(2.5, 5.2, 4);
+  add(B.iron, roof, 0, 17.2 + 2.6, 0, Math.PI / 4);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(B.gold, new THREE.ConeGeometry(0.22, 1.5, 4), sx * 1.85, 15.55, sz * 1.85);
+  add(B.gold, new THREE.CylinderGeometry(0.04, 0.16, 1.4, 8), 0, 17.2 + 5.2 + 0.6, 0); // tip at 23.85 m (< MAX_TOP)
+  colliderBox(parent, colliders, 4, 23, 4, lx, y0 + 11.5, lz);
+}
+
+// ----- The London Eye: slowly turning wheel with LED rim and upright pods -----
+
+function addLondonEye(parent, colliders, lx, lz) {
+  const R = 9.6, cy = KERB_H + 12.8, N = 32;
+  const steel = new THREE.MeshStandardMaterial({ color: 0xdfe4ea, metalness: 0.7, roughness: 0.35, envMapIntensity: 0.6 });
+  const wheel = new THREE.Group();
+  wheel.position.set(lx, cy, lz);
+  const parts = [];
+  for (const [r, t] of [[R, 0.13], [R - 0.9, 0.08]]) {
+    const ring = new THREE.TorusGeometry(r, t, 8, 128);
+    ring.rotateY(Math.PI / 2); // wheel turns in the z–y plane
+    parts.push(ring);
+  }
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * TAU;
+    const tip = new THREE.Vector3(0, Math.sin(a) * (R - 0.9), Math.cos(a) * (R - 0.9));
+    parts.push(cylinderBetween(new THREE.Vector3(0.6 * Math.sign(i % 2 - 0.5), 0, 0), tip, 0.035, 5));
+    const a2 = ((i + 0.5) / N) * TAU; // truss between the rims
+    parts.push(cylinderBetween(tip, new THREE.Vector3(0, Math.sin(a2) * R, Math.cos(a2) * R), 0.03, 4));
+  }
+  const hub = new THREE.CylinderGeometry(0.6, 0.6, 1.4, 16);
+  hub.rotateZ(Math.PI / 2);
+  parts.push(hub);
+  const frame = new THREE.Mesh(mergeGeometries(parts.map((p) => { for (const k of Object.keys(p.attributes)) if (!['position', 'normal', 'uv'].includes(k)) p.deleteAttribute(k); return p; })), steel);
+  frame.castShadow = true;
+  const led = new THREE.Mesh(new THREE.TorusGeometry(R + 0.05, 0.05, 6, 192), new THREE.MeshBasicMaterial({ color: new THREE.Color(0.7, 0.55, 2.6) }));
+  led.rotation.y = Math.PI / 2;
+  led.userData.noSSAO = true;
+  wheel.add(frame, led);
+  parent.add(wheel);
+
+  // A-frame legs on the +x side, leaning in to the hub.
+  const legs = [];
+  for (const sz of [-1, 1]) legs.push(cylinderBetween(new THREE.Vector3(lx + 5.4, KERB_H, lz + sz * 4.6), new THREE.Vector3(lx + 0.8, cy, lz), 0.32, 10));
+  legs.push(cylinderBetween(new THREE.Vector3(lx + 4.4, KERB_H + 3, lz - 3.7), new THREE.Vector3(lx + 4.4, KERB_H + 3, lz + 3.7), 0.18, 8));
+  const legMesh = new THREE.Mesh(mergeGeometries(legs), steel);
+  legMesh.castShadow = legMesh.receiveShadow = true;
+  parent.add(legMesh);
+  for (const sz of [-1, 1]) colliderBox(parent, colliders, 1, 2.5, 1, lx + 5.2, KERB_H + 1.25, lz + sz * 4.4);
+
+  // Pods (instanced) hang on the outside of the rim and stay upright as the wheel turns.
+  const podGeo = new THREE.CapsuleGeometry(0.42, 0.9, 6, 12);
+  podGeo.rotateZ(Math.PI / 2);
+  const pods = new THREE.InstancedMesh(podGeo, new THREE.MeshStandardMaterial({
+    color: 0x9fb6c8, emissive: 0x9ec8ff, emissiveIntensity: 1.2, metalness: 0.3, roughness: 0.15, envMapIntensity: 0.6,
+  }), N);
+  pods.frustumCulled = false;
+  pods.castShadow = true;
+  parent.add(pods);
+  const dummy = new THREE.Object3D();
+  const place = () => {
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * TAU + wheel.rotation.x;
+      dummy.position.set(lx, cy + Math.sin(a) * (R + 0.7), lz + Math.cos(a) * (R + 0.7));
+      dummy.updateMatrix();
+      pods.setMatrixAt(i, dummy.matrix);
+    }
+    pods.instanceMatrix.needsUpdate = true;
+  };
+  place();
+  return {
+    update(dt) {
+      wheel.rotation.x += dt * 0.025; // ~4 minutes per turn: majestic, like the real thing
+      place();
+    },
+  };
+}
+
+// ----- Street furniture (merged into batches) -----
+
+function addPhoneBox(B, colliders, parent, x, z, yaw) {
+  const M0 = mat(x, KERB_H, z, yaw);
+  const at = (gx, gy, gz, ry = 0) => M0.clone().multiply(mat(gx, gy, gz, ry));
+  B.paint.add(new THREE.BoxGeometry(1.0, 0.12, 1.0), at(0, 0.06, 0), LONDON_RED);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) B.paint.add(new THREE.BoxGeometry(0.1, 2.3, 0.1), at(sx * 0.46, 1.27, sz * 0.46), LONDON_RED);
+  B.paint.add(new THREE.BoxGeometry(1.04, 0.32, 1.04), at(0, 2.56, 0), LONDON_RED);
+  B.paint.add(new THREE.CylinderGeometry(0.34, 0.66, 0.22, 4), at(0, 2.83, 0, Math.PI / 4), LONDON_RED);
+  for (let k = 0; k < 4; k++) {
+    const ry = (k * Math.PI) / 2, nx = Math.sin(ry), nz = Math.cos(ry);
+    B.glassLit.add(new THREE.BoxGeometry(0.8, 1.75, 0.02), at(nx * 0.44, 1.2, nz * 0.44, ry), lit(0.2, 0.15, 0.09));
+    for (const gy of [0.6, 1.05, 1.5, 1.9]) B.paint.add(new THREE.BoxGeometry(0.82, 0.04, 0.05), at(nx * 0.46, gy, nz * 0.46, ry), LONDON_RED);
+    for (const gx of [-0.27, 0.27]) B.paint.add(new THREE.BoxGeometry(0.04, 1.75, 0.05), at(nx * 0.46 + Math.cos(ry) * gx, 1.2, nz * 0.46 - Math.sin(ry) * gx, ry), LONDON_RED);
+    B.glassLit.add(new THREE.BoxGeometry(0.7, 0.14, 0.02), at(nx * 0.53, 2.56, nz * 0.53, ry), lit(1.1, 1.05, 0.95)); // sign strip
+  }
+  colliderBox(parent, colliders, 1.0, 2.9, 1.0, x, KERB_H + 1.45, z);
+}
+
+function addWheels(B, M0, xs, zs, r, w) {
+  const wheel = new THREE.CylinderGeometry(r, r, w, 16);
+  wheel.rotateX(Math.PI / 2);
+  for (const x of xs) for (const z of zs) B.rubber.add(wheel, M0.clone().multiply(mat(x, r, z)));
+}
+
+function addBus(B, colliders, parent, x, z, yaw) {
+  const L = 10.2, W = 2.5;
+  const M0 = mat(x, 0, z, yaw);
+  const at = (gx, gy, gz) => M0.clone().multiply(mat(gx, gy, gz));
+  B.carPaint.add(new THREE.BoxGeometry(L, 3.6, W), at(0, 2.25, 0), LONDON_RED);
+  B.carPaint.add(new THREE.BoxGeometry(L - 0.25, 0.18, W - 0.12), at(0, 4.13, 0), LONDON_RED);
+  B.rubber.add(new THREE.BoxGeometry(L + 0.02, 0.4, W + 0.02), at(0, 0.62, 0));
+  for (const s of [-1, 1]) {
+    B.glassLit.add(new THREE.BoxGeometry(L - 2.4, 0.85, 0.02), at(-0.6, 1.95, s * (W / 2 + 0.01)), lit(0.75, 0.62, 0.42));
+    B.glassLit.add(new THREE.BoxGeometry(L - 0.8, 0.8, 0.02), at(0, 3.4, s * (W / 2 + 0.01)), lit(0.85, 0.7, 0.45));
+  }
+  B.glass.add(new THREE.BoxGeometry(0.02, 1.1, W - 0.3), at(L / 2 + 0.01, 1.95, 0));
+  B.glassLit.add(new THREE.BoxGeometry(0.02, 0.8, W - 0.3), at(L / 2 + 0.01, 3.4, 0), lit(0.8, 0.66, 0.44));
+  B.glassLit.add(new THREE.BoxGeometry(0.03, 0.3, 1.6), at(L / 2 + 0.02, 2.75, 0), lit(2.0, 1.25, 0.2));   // destination blind
+  for (const s of [-1, 1]) {
+    B.glassLit.add(new THREE.BoxGeometry(0.03, 0.18, 0.3), at(L / 2 + 0.02, 0.95, s * 0.9), lit(2.2, 2.1, 1.8));  // headlights
+    B.glassLit.add(new THREE.BoxGeometry(0.03, 0.25, 0.18), at(-L / 2 - 0.02, 1.0, s * 1.0), lit(1.8, 0.1, 0.05)); // tail lights
+  }
+  addWheels(B, M0, [-3.4, 3.4], [-(W / 2 - 0.2), W / 2 - 0.2], 0.5, 0.32);
+  const c = colliderBox(parent, colliders, L, 4.2, W, x, 2.1, z);
+  c.rotation.y = yaw;
+}
+
+function addTaxi(B, colliders, parent, x, z, yaw) {
+  const M0 = mat(x, 0, z, yaw);
+  const at = (gx, gy, gz) => M0.clone().multiply(mat(gx, gy, gz));
+  B.carPaint.add(new THREE.BoxGeometry(4.5, 0.78, 1.8), at(0, 0.72, 0), TAXI_BLACK);
+  B.carPaint.add(new THREE.BoxGeometry(2.7, 0.72, 1.7), at(-0.25, 1.46, 0), TAXI_BLACK);
+  B.carPaint.add(new THREE.BoxGeometry(2.6, 0.06, 1.62), at(-0.25, 1.84, 0), TAXI_BLACK);
+  for (const s of [-1, 1]) B.glass.add(new THREE.BoxGeometry(2.35, 0.48, 0.02), at(-0.25, 1.5, s * 0.86));
+  B.glass.add(new THREE.BoxGeometry(0.02, 0.5, 1.52), at(1.11, 1.5, 0));
+  B.glassLit.add(new THREE.BoxGeometry(0.5, 0.14, 0.22), at(0.25, 1.94, 0), lit(2.2, 1.5, 0.25));   // TAXI light
+  B.stone.add(boxGeometry(0.04, 0.38, 0.62, [1, 1]), at(2.26, 0.78, 0));                           // grille
+  const lamp = new THREE.CylinderGeometry(0.12, 0.12, 0.05, 12);
+  lamp.rotateZ(Math.PI / 2);
+  for (const s of [-1, 1]) {
+    B.glassLit.add(lamp, at(2.27, 0.86, s * 0.62), lit(2.2, 2.1, 1.8));
+    B.glassLit.add(new THREE.BoxGeometry(0.03, 0.16, 0.16), at(-2.27, 0.86, s * 0.7), lit(1.8, 0.1, 0.05));
+  }
+  addWheels(B, M0, [-1.45, 1.45], [-0.82, 0.82], 0.34, 0.22);
+  const c = colliderBox(parent, colliders, 4.5, 1.9, 1.8, x, 0.95, z);
+  c.rotation.y = yaw;
+}
+
+/** Underground roundel on a post: red ring and blue bar, both glowing (no text). */
+function addRoundel(B, x, z, yaw) {
+  const M0 = mat(x, KERB_H, z, yaw);
+  B.iron.add(new THREE.CylinderGeometry(0.06, 0.07, 3.2, 8), M0.clone().multiply(mat(0, 1.6, 0)));
+  const ring = new THREE.RingGeometry(0.42, 0.62, 48);
+  for (const flip of [0, Math.PI]) B.glassLit.add(ring, M0.clone().multiply(mat(0, 3.4, flip ? -0.02 : 0.02, flip)), lit(1.15, 0.03, 0.05));
+  B.glassLit.add(new THREE.BoxGeometry(1.7, 0.27, 0.08), M0.clone().multiply(mat(0, 3.4, 0)), lit(0.03, 0.09, 1.0));
+}
+
+const STREET_NAMES = [
+  ['BAKER STREET', 'NW1'], ['ABBEY ROAD', 'NW8'], ['FLEET STREET', 'EC4'], ['CARNABY STREET', 'W1'],
+  ['BRICK LANE', 'E1'], ['PORTOBELLO ROAD', 'W11'], ['SAVILE ROW', 'W1'], ['DRURY LANE', 'WC2'],
+];
+
+/** All street-name plates in one texture (8 rows); white plate, black border and name, red district. */
+function streetSignAtlas() {
+  const W = 1024, rowH = 128, c = makeCanvas(W, rowH * STREET_NAMES.length), g = c.getContext('2d');
+  STREET_NAMES.forEach(([name, code], i) => {
+    const y = i * rowH;
+    g.fillStyle = '#f4f2ec';
+    g.fillRect(0, y, W, rowH);
+    g.strokeStyle = '#111';
+    g.lineWidth = 10;
+    g.strokeRect(10, y + 10, W - 20, rowH - 20);
+    g.font = '700 70px "Helvetica Neue", Helvetica, Arial, sans-serif';
+    g.textBaseline = 'middle';
+    g.textAlign = 'left';
+    const width = (str) => { const m = g.measureText(str).width; return typeof m === 'number' ? m : str.length * 42; };
+    const nameW = width(name), codeW = width(` ${code}`);
+    const x0 = (W - nameW - codeW) / 2;
+    g.fillStyle = '#111';
+    g.fillText(name, x0, y + rowH / 2 + 3);
+    g.fillStyle = '#c8102e';
+    g.fillText(` ${code}`, x0 + nameW, y + rowH / 2 + 3);
+  });
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+function streetSignGeometry(i) {
+  const g = new THREE.PlaneGeometry(1.4, 1.4 / 8);
+  const uv = g.attributes.uv, n = STREET_NAMES.length;
+  for (let k = 0; k < uv.count; k++) uv.setY(k, (n - 1 - i + uv.getY(k)) / n);
+  return g;
+}
+
+/** White-stucco Georgian/Victorian front door: black door, glowing fanlight, columned porch, step. */
+function georgianDoor(B, face, x, base) {
+  const at = (gx, gy, gz) => face.clone().multiply(mat(x + gx, base + gy, gz));
+  B.paint.add(new THREE.BoxGeometry(1.0, 2.25, 0.08), at(0, 1.13, -0.02), new THREE.Color('#0d0d0f'));
+  const fan = new THREE.CircleGeometry(0.5, 24, 0, Math.PI);
+  B.glassLit.add(fan, at(0, 2.3, 0.01), lit(1.4, 1.0, 0.55));
+  for (const s of [-1, 1]) B.stucco.add(new THREE.CylinderGeometry(0.11, 0.13, 2.85, 12), at(s * 0.82, 1.43, 0.55));
+  B.stucco.add(boxGeometry(2.1, 0.32, 0.75, [2, 2]), at(0, 3.0, 0.3));
+  B.stone.add(boxGeometry(1.8, 0.16, 0.9, [2, 2]), at(0, 0.08, 0.45));
+}
+
+/** Black iron railings along a facade, leaving a gap for the door. */
+function railings(B, face, width, doorX, base) {
+  const bar = new THREE.BoxGeometry(0.025, 1.0, 0.025);
+  for (let x = -width / 2 + 0.1; x < width / 2 - 0.05; x += 0.14) {
+    if (Math.abs(x - doorX) < 0.95) continue;
+    B.iron.add(bar, face.clone().multiply(mat(x, base + 0.5, 1.15)));
+  }
+  for (const [a, b] of [[-width / 2 + 0.05, doorX - 0.95], [doorX + 0.95, width / 2 - 0.05]]) {
+    if (b - a < 0.2) continue;
+    B.iron.add(new THREE.BoxGeometry(b - a, 0.05, 0.05), face.clone().multiply(mat((a + b) / 2, base + 1.0, 1.15)));
+  }
+}
+
 // ---------- build ----------
 
 function buildEnvironment(scene, world, colliders, tex) {
@@ -589,6 +1100,8 @@ function buildEnvironment(scene, world, colliders, tex) {
     paint: new Batch(M.paint, { vertexColors: true }), glass: new Batch(M.glass, { cast: false }),
     glassLit: new Batch(M.glassLit, { vertexColors: true, cast: false, receive: false }),
     pavement: new Batch(M.pavement, { cast: false }), puddle: new Batch(M.puddle, { cast: false }),
+    stucco: new Batch(M.stucco), sandstone: new Batch(M.sandstone), gold: new Batch(M.gold), iron: new Batch(M.iron),
+    rubber: new Batch(M.rubber), signs: new Batch(M.signs, { cast: false }), carPaint: new Batch(M.carPaint, { vertexColors: true }),
   };
 
   // Road (asphalt) and ceiling (stone, where the player lands).
@@ -618,19 +1131,31 @@ function buildEnvironment(scene, world, colliders, tex) {
   const towers = new Set();
   while (towers.size < 9) {
     const [lx, lz] = pick(rand, outer);
-    if (!(lx === GLOBE.x && lz === GLOBE.z)) towers.add(`${lx},${lz}`);
+    if (!(lx === GLOBE.x && lz === GLOBE.z) && !landmarkAt(lx, lz)) towers.add(`${lx},${lz}`);
   }
   const kit = houseKit(B, rand);
   const TB = { facades: M.tower.map((m) => new Batch(m)), concrete: new Batch(M.concrete), metal: new Batch(M.iron) };
   const slab = boxGeometry(LOT_HALF * 2, KERB_H, LOT_HALF * 2, [2, 2]);
+  const houseLots = [];
+  let eye = null;
   for (const lx of LOTS) {
     for (const lz of LOTS) {
       B.pavement.add(slab, mat(lx, KERB_H / 2, lz));
       colliderBox(world, colliders, LOT_HALF * 2, KERB_H, LOT_HALF * 2, lx, KERB_H / 2, lz);
       const plaza = (lx === PLATE.x && lz === PLATE.y) || (lx === GLOBE.x && lz === GLOBE.z);
       if (plaza) continue;
+      const lm = landmarkAt(lx, lz);
+      if (lm === 'marshallWace') { addMarshallWace(B, TB, world, colliders, lx, lz); continue; }
+      if (lm === 'shard') { addShard(world, colliders, lx, lz, rand); continue; }
+      if (lm === 'gherkin') { addGherkin(world, colliders, lx, lz, rand); continue; }
+      if (lm === 'bigBen') { addBigBen(B, world, colliders, lx, lz); continue; }
+      if (lm === 'londonEye') { eye = addLondonEye(world, colliders, lx, lz); continue; }
       if (towers.has(`${lx},${lz}`)) { addTower(TB, rand, world, colliders, lx, lz); continue; }
-      for (const [ox, oz, w, d] of pick(rand, BLOCK_LAYOUTS)) addHouse(B, kit, rand, world, colliders, lx + ox, lz + oz, w, d, lx, lz);
+      // Old town blocks, with London white-stucco terraces mixed in.
+      const georgian = rand() < 0.32;
+      const layout = georgian ? pick(rand, [BLOCK_LAYOUTS[2], BLOCK_LAYOUTS[4]]) : pick(rand, BLOCK_LAYOUTS);
+      for (const [ox, oz, w, d] of layout) addHouse(B, kit, rand, world, colliders, lx + ox, lz + oz, w, d, lx, lz, georgian ? 'georgian' : 'old');
+      houseLots.push([lx, lz]);
     }
   }
 
@@ -654,8 +1179,23 @@ function buildEnvironment(scene, world, colliders, tex) {
     for (let i = 0; i < 4; i++) addPuddle(px + (rand() - 0.5) * 9, KERB_H + 0.012, pz + (rand() - 0.5) * 9, 1.2 + rand() * 2, 1 + rand());
   }
 
+  // London street life: phone boxes, buses, black cabs, Underground roundels, street-name plates.
+  for (const [x, z, yaw] of [[-2.75, 3.2, Math.PI / 2], [13.25, 4.6, -Math.PI / 2], [-13.25, -21.5, -Math.PI / 2], [2.75, -20.5, Math.PI / 2],
+    [-18.75, 27.2, Math.PI / 2], [29.25, -12.6, -Math.PI / 2], [18.75, 11.2, Math.PI / 2]]) addPhoneBox(B, colliders, world, x, z, yaw);
+  for (const [x, z, yaw] of [[24, -0.75, 0], [-16.75, -24, Math.PI / 2], [16.75, 27, Math.PI / 2], [-27, 15.25, Math.PI]]) addBus(B, colliders, world, x, z, yaw);
+  for (const [x, z, yaw] of [[7, 15.25, 0], [-32.75, -6, Math.PI / 2], [16.75, 8, -Math.PI / 2], [-7, -16.75, Math.PI], [30, -15.25, 0], [-0.75, 25, Math.PI / 2]]) addTaxi(B, colliders, world, x, z, yaw);
+  for (const [x, z, yaw] of [[13.4, -2.6, Math.PI / 4], [-29.4, 18.6, -Math.PI / 4], [-2.6, 13.4, Math.PI / 4], [18.6, 29.4, -Math.PI / 4]]) {
+    addRoundel(B, x, z, yaw);
+    colliderBox(world, colliders, 0.2, 3, 0.2, x, KERB_H + 1.5, z);
+  }
+  houseLots.forEach(([lx, lz], i) => {
+    if (i % 3 === 2) return;
+    B.signs.add(streetSignGeometry(i % STREET_NAMES.length), mat(lx + BUILD_HALF + 0.03, KERB_H + 3.35, lz + BUILD_HALF - 0.95, Math.PI / 2));
+    B.signs.add(streetSignGeometry((i + 3) % STREET_NAMES.length), mat(lx + BUILD_HALF - 0.95, KERB_H + 3.35, lz + BUILD_HALF + 0.03, 0));
+  });
+
   for (const b of [B.brick, ...B.plaster, B.stone, B.roof, B.wood, B.shutter, B.paint, B.glass, B.glassLit, B.pavement, B.puddle,
-    ...TB.facades, TB.concrete, TB.metal]) b.build(world);
+    B.stucco, B.sandstone, B.gold, B.iron, B.rubber, B.signs, B.carPaint, ...TB.facades, TB.concrete, TB.metal]) b.build(world);
 
   // Cast-iron street lamps on the block corners (instanced), red glass that blooms.
   const lamp = lampGeometry();
@@ -692,7 +1232,7 @@ function buildEnvironment(scene, world, colliders, tex) {
   world.add(hydrant);
   colliderBox(world, colliders, 0.36, 0.85, 0.36, HYDRANT_PROP.x, KERB_H + 0.42, HYDRANT_PROP.z);
 
-  return { hemi, top, below };
+  return { hemi, top, below, eye };
 }
 
 // ---------- pressure plate: swirling golden particle portal ----------
@@ -1639,7 +2179,7 @@ export default {
     ]);
     if (ctx !== c) return; // left the scene while loading
 
-    const lights = buildEnvironment(scene, world, player.colliders, tex);
+    const { eye, ...lights } = buildEnvironment(scene, world, player.colliders, tex);
     // The ceiling gets its own group so the globe sequence can pull it in from above the globe.
     const sky = new THREE.Group();
     scene.add(sky);
@@ -1653,7 +2193,7 @@ export default {
 
     const lightBase = { hemi: lights.hemi.intensity, top: lights.top.intensity, below: lights.below.intensity };
     s = {
-      portal, scene, world, sky, lights, lightBase, fogDensity: FOG.density, globe,
+      portal, eye, scene, world, sky, lights, lightBase, fogDensity: FOG.density, globe,
       time: 0, flash: 0, active: 0, pendingFlip: null, wasGrounded: false, flips: 0,
     };
 
@@ -1693,6 +2233,7 @@ export default {
     s.active += (target - s.active) * Math.min(1, dt * 6);
     s.flash = Math.max(0, s.flash - dt * 1.5);
     s.portal.update(dt, s.time, s.active, s.flash, seq ? seq.worldFade : 1);
+    s.eye?.update(dt);
 
     if (p.grounded && !s.wasGrounded) landSound();
     s.wasGrounded = p.grounded;
