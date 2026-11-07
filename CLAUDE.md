@@ -10,7 +10,8 @@ First-person 3D browser game in Three.js. Full spec: docs/GAME.md — follow it 
 - src/core/: shared systems — player.js (WASD, mouse look, SPACE jump, gravity direction + flipGravity()),
   interact.js (E key + "Press E to interact" prompt via raycast), dialogue.js (subtitle box),
   effects.js (red ERROR! bubble-text glitch, fades), audio.js
-- src/scenes/: one file per scene: conveyor, fall, inverted, quirkland, ending.
+- src/scenes/: one file per scene: conveyor, inverted, quirkland, ending (game order). The conveyor exits straight
+  into the inverted scene — there is no separate fall scene (src/scenes/fall.js is unused; goTo('fall') redirects to 'inverted').
   Each exports default { name, init(ctx), update(dt), dispose() }.
   ctx = { scene, camera, player, interact, dialogue, effects, audio, goTo(name), post, setEnvironment(url), assets }.
   A scene ends by calling ctx.goTo('<next scene>'). Optional transition: ctx.goTo(name, { fadeColor: '#fff', fadeOutMs: 300, fadeInMs: 400 })
@@ -39,7 +40,7 @@ First-person 3D browser game in Three.js. Full spec: docs/GAME.md — follow it 
 ## Ownership — only edit files you own
 - Emir: src/main.js, src/core/player.js, src/core/interact.js, src/core/audio.js, src/scenes/inverted.js
 - Varshan: src/core/dialogue.js, src/scenes/quirkland.js
-- Joshua: src/core/effects.js, src/scenes/conveyor.js, fall.js, ending.js
+- Joshua: src/core/effects.js, src/scenes/conveyor.js, ending.js
 - Need a change in someone else's file? Stop and tell the user instead of editing it.
 
 ## Git
