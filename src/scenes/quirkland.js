@@ -5,6 +5,7 @@ import * as THREE from 'three';
 //   Air (north-east), Water (north-west), Nature (south-west), Fire (south-east).
 // Arrival → Fire Hydrant intro cutscene → he follows the player as a faded companion.
 // In the Water zone, E on the hydrant shows his (weak) ability.
+// Inhabitants (E): Ember the dragon (Fire).
 // TEMP: the grey cube at the north edge goes to 'ending' until the masked figure (§9) is built.
 
 const NAME = 'quirkland';
@@ -366,10 +367,12 @@ function buildAir() {
 }
 
 function buildFire() {
+  const emberAt = zoneCenter('Fire', 27); // keep her clearing free
   // Lava pools.
   const rockMat = std(0x3b2622, { flatShading: true });
   for (let i = 0; i < 6; i++) {
     const p = randInZone('Fire', 12, 50);
+    if (p.distanceTo(emberAt) < 11) continue;
     const r = 1.2 + rand() * 2.2;
     const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff6a10 });
     const lava = mesh(new THREE.CircleGeometry(r, 24), lavaMat, p.x, 0.02, p.z);
@@ -384,6 +387,7 @@ function buildFire() {
   const rockGeo = new THREE.DodecahedronGeometry(1, 0);
   for (let i = 0; i < 16; i++) {
     const p = randInZone('Fire', 10, 54);
+    if (p.distanceTo(emberAt) < 9) continue;
     const s = 0.5 + rand() * 1.3;
     const m = mesh(rockGeo, rockMat, p.x, s * 0.4, p.z);
     m.scale.set(s, s * 0.8, s);
@@ -397,7 +401,7 @@ function buildFire() {
   mesh(new THREE.SphereGeometry(2.3, 16, 10), new THREE.MeshBasicMaterial({ color: 0xff7a1a }), vp.x, 11.4, vp.z);
 
   // Embers drifting up everywhere in the zone, and out of the crater.
-  const embers = new Particles({ count: 260, color: 0xffc04a, color2: 0xff2a00, size: 0.12, additive: true, gravity: -0.5 });
+  const embers = new Particles({ count: 260, color: 0xffc04a, color2: 0xff2a00, size: 0.12, gravity: -0.5 });
   let acc = 0;
   every((dt) => {
     acc += dt * 40;
@@ -762,6 +766,195 @@ async function hydrantAbility() {
   busy = false;
 }
 
+// ---------- inhabitants ----------
+// Each one: E → their line → ability demo → the Fire Hydrant reacts.
+async function meet(who) {
+  if (busy || state !== 'free') return;
+  busy = true;
+  const g = gen;
+  await faceToward(who.group, ctx.player.position, 0.4);
+  if (!alive(g)) return;
+  await ctx.dialogue.say(who.line, { speaker: who.name, color: who.color });
+  if (!alive(g)) return;
+  await who.ability(g);
+  if (!alive(g)) return;
+  await ctx.dialogue.say(who.reaction, { speaker: HYDRANT, color: HYDRANT_COLOR });
+  if (!alive(g)) return;
+  busy = false;
+}
+
+function faceToward(obj, p, sec) {
+  const r0 = obj.rotation.y;
+  const r1 = Math.atan2(p.x - obj.position.x, p.z - obj.position.z);
+  return tween(sec, (k) => { obj.rotation.y = lerpAngle(r0, r1, ease(k)); });
+}
+
+// --- Ember the dragon (Fire) ---
+function buildEmber() {
+  const at = zoneCenter('Fire', 27);
+  const g = new THREE.Group();
+  g.position.copy(at);
+  g.rotation.y = Math.atan2(-at.x, -at.z); // face the plaza
+  ctx.scene.add(g);
+
+  const scale = std(0xff4a1c, { emissive: 0xff3300, emissiveIntensity: 0.35, roughness: 0.5 });
+  const belly = std(0xffc24d, { emissive: 0xffa000, emissiveIntensity: 0.3 });
+  const wingMat = std(0xff2d6a, { emissive: 0xff1040, emissiveIntensity: 0.3, side: THREE.DoubleSide });
+  const horn = std(0xfff1c1);
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const black = new THREE.MeshBasicMaterial({ color: 0x111111 });
+  const ball = new THREE.SphereGeometry(1, 20, 14);
+
+  const body = mesh(ball, scale, 0, 1.4, 0, g);
+  body.scale.set(1.1, 0.95, 1.5);
+  collide(body);
+  mesh(ball, belly, 0, 1.25, 0.5, g).scale.set(0.85, 0.75, 1.05);
+  for (const [x, z] of [[-0.6, 0.7], [0.6, 0.7], [-0.6, -0.7], [0.6, -0.7]]) {
+    mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.9, 10), scale, x, 0.45, z, g);
+  }
+
+  const neck = new THREE.Group();
+  neck.position.set(0, 1.9, 1.0);
+  g.add(neck);
+  mesh(new THREE.CylinderGeometry(0.32, 0.45, 1.4, 12), scale, 0, 0.6, 0.25, neck).rotation.x = 0.4;
+  const head = new THREE.Group();
+  head.position.set(0, 1.35, 0.55);
+  neck.add(head);
+  mesh(ball, scale, 0, 0, 0, head).scale.set(0.55, 0.48, 0.62);
+  mesh(ball, scale, 0, -0.1, 0.55, head).scale.set(0.4, 0.3, 0.45);
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.SphereGeometry(0.15, 12, 8), white, sx * 0.26, 0.15, 0.38, head);
+    mesh(new THREE.SphereGeometry(0.075, 8, 6), black, sx * 0.29, 0.16, 0.5, head);
+    mesh(new THREE.ConeGeometry(0.09, 0.45, 8), horn, sx * 0.22, 0.48, -0.2, head).rotation.x = -0.5;
+    mesh(new THREE.SphereGeometry(0.04, 6, 4), black, sx * 0.12, -0.02, 0.98, head);
+  }
+  const mouth = new THREE.Object3D();
+  mouth.position.set(0, -0.15, 1.0);
+  head.add(mouth);
+
+  const wingShape = new THREE.Shape([
+    new THREE.Vector2(0, 0), new THREE.Vector2(2.3, 0.9), new THREE.Vector2(2.7, -0.2),
+    new THREE.Vector2(1.9, -0.5), new THREE.Vector2(1.2, -0.9), new THREE.Vector2(0.5, -0.6),
+  ]);
+  const wingGeo = new THREE.ShapeGeometry(wingShape).rotateX(-Math.PI / 2);
+  const wings = [-1, 1].map((sx) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(sx * 0.6, 2.1, -0.1);
+    pivot.scale.x = sx;
+    g.add(pivot);
+    mesh(wingGeo, wingMat, 0, 0, 0, pivot);
+    return pivot;
+  });
+
+  const tail = [];
+  for (let i = 0; i < 8; i++) {
+    const r = 0.42 * (1 - i / 9);
+    tail.push(mesh(new THREE.SphereGeometry(r, 12, 8), scale, 0, 1.15 - i * 0.12, -1.4 - i * 0.42, g));
+  }
+  const tip = mesh(new THREE.ConeGeometry(0.18, 0.4, 4), wingMat, 0, 0.2, -4.9, g);
+  tip.rotation.x = -Math.PI / 2;
+  tail.push(tip);
+
+  // Unlit torches in a ring around her.
+  const wood = std(0x4a2e1e), iron = std(0x333333), coal = std(0x1c1c1c);
+  const torches = [];
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2 + 0.2;
+    const tx = at.x + Math.cos(a) * 6, tz = at.z + Math.sin(a) * 6;
+    collide(mesh(new THREE.CylinderGeometry(0.08, 0.11, 1.7, 8), wood, tx, 0.85, tz));
+    mesh(new THREE.CylinderGeometry(0.26, 0.14, 0.25, 12), iron, tx, 1.8, tz);
+    const char = mesh(new THREE.SphereGeometry(0.2, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), coal, tx, 1.88, tz);
+    const flame = new THREE.Group();
+    flame.position.set(tx, 1.9, tz);
+    flame.visible = false;
+    ctx.scene.add(flame);
+    mesh(new THREE.ConeGeometry(0.24, 0.7, 10), new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.9 }), 0, 0.35, 0, flame);
+    mesh(new THREE.ConeGeometry(0.12, 0.4, 8), new THREE.MeshBasicMaterial({ color: 0xffe680 }), 0, 0.22, 0, flame);
+    const light = new THREE.PointLight(0xff8a3a, 0, 10, 1.5);
+    light.position.set(tx, 2.4, tz);
+    ctx.scene.add(light);
+    torches.push({ x: tx, z: tz, char, flame, light, lit: false, ph: rand() * 6 });
+  }
+
+  const fire = new Particles({ count: 600, color: 0xffd04a, color2: 0xff3000, size: 0.3, grow: 2.2, gravity: -1.5, drag: 0.6 });
+
+  const ember = {
+    name: 'Ember', color: '#ff8a3d', group: g,
+    line: 'A human! Do they still tell stories about dragons out there? They must — look how bright I am!',
+    reaction: 'Show-off.',
+    ability: (gg) => emberBreath(ember, gg),
+    neck, mouth, torches, fire,
+  };
+
+  every(() => {
+    const b = 1 + Math.sin(time * 2) * 0.03;
+    body.scale.set(1.1 * b, 0.95 * b, 1.5);
+    wings[0].rotation.z = -(0.25 + Math.sin(time * 2.4) * 0.3);
+    wings[1].rotation.z = -(0.25 + Math.sin(time * 2.4) * 0.3);
+    tail.forEach((m, i) => { m.position.x = Math.sin(time * 2 - i * 0.6) * i * 0.06; });
+    for (const t of torches) {
+      if (!t.lit) continue;
+      const f = 1 + Math.sin(time * 14 + t.ph) * 0.12 + Math.sin(time * 23 + t.ph) * 0.06;
+      t.flame.scale.set(1, f, 1);
+      t.light.intensity = 9 * f;
+    }
+  });
+
+  ctx.interact.add(g, () => meet(ember), { distance: 7 });
+  return ember;
+}
+
+async function emberBreath(e, g) {
+  const { audio } = ctx;
+  const g0 = e.group;
+  const mouthPos = V(0, 0, 0), aim = V(0, 0, 0);
+
+  // Rear back...
+  await tween(0.5, (k) => { e.neck.rotation.x = -0.45 * ease(k); });
+  if (!alive(g)) return;
+  audio.noise(1.6, { volume: 0.3 });
+  audio.tone(70, 1.4, { type: 'sawtooth', volume: 0.12 });
+
+  // ...then a full sweep of fire, lighting every torch the plume reaches.
+  const r0 = g0.rotation.y;
+  let acc = 0;
+  await tween(3.4, (k, dt) => {
+    e.neck.rotation.x = -0.45 + 0.75 * Math.min(1, k * 6);
+    g0.rotation.y = r0 + ease(k) * Math.PI * 2;
+    e.mouth.getWorldPosition(mouthPos);
+    const fx = Math.sin(g0.rotation.y), fz = Math.cos(g0.rotation.y);
+    aim.set(g0.position.x + fx * 6, 2.0, g0.position.z + fz * 6).sub(mouthPos).normalize();
+    acc += dt * 170;
+    while (acc > 1) {
+      acc--;
+      const sp = 9 + Math.random() * 3;
+      e.fire.emit(mouthPos, V(aim.x * sp + (Math.random() - 0.5) * 1.6, aim.y * sp + (Math.random() - 0.5) * 1.6, aim.z * sp + (Math.random() - 0.5) * 1.6),
+        0.55 + Math.random() * 0.3, 0.25 + Math.random() * 0.2);
+    }
+    for (const t of e.torches) {
+      if (t.lit) continue;
+      const bearing = Math.atan2(t.x - g0.position.x, t.z - g0.position.z);
+      if (Math.abs(lerpAngle(0, bearing - g0.rotation.y, 1)) < 0.2) lightTorch(t, g);
+    }
+  });
+  if (!alive(g)) return;
+  await tween(0.4, (k) => { e.neck.rotation.x = 0.3 * (1 - ease(k)); });
+  if (!alive(g)) return;
+  await faceToward(g0, ctx.player.position, 0.4);
+}
+
+function lightTorch(t, g) {
+  t.lit = true;
+  setTimeout(() => {
+    if (!alive(g)) return;
+    t.char.visible = false;
+    t.flame.visible = true;
+    ctx.audio.noise(0.25, { volume: 0.15 });
+    ctx.audio.tone(320, 0.2, { type: 'triangle', volume: 0.06 });
+    tween(0.3, (k) => { t.flame.scale.setScalar(Math.max(0.01, easeOutBack(k))); });
+  }, 380);
+}
+
 // ---------- zone title ----------
 function showZone(name) {
   if (!toastEl) return;
@@ -793,6 +986,7 @@ export default {
 
     buildWorld();
     hydrant = buildHydrant();
+    buildEmber();
 
     ctx.player.spawn(V(0, 0, 5), 0);
     intro(gen);
