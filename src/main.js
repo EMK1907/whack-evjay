@@ -260,7 +260,11 @@ const interact = new Interact(camera, {
   getOccluders: () => player.colliders,
 });
 
-async function goTo(name) {
+/**
+ * Switch scene. Options: fadeColor (CSS colour of the transition, default black), fadeOutMs / fadeInMs
+ * (default 400 each). E.g. ctx.goTo('quirkland', { fadeColor: '#fff', fadeOutMs: 300 }) for a white flash.
+ */
+async function goTo(name, { fadeColor = '#000', fadeOutMs = 400, fadeInMs = 400 } = {}) {
   if (!SCENES[name]) {
     console.error(`goTo: unknown scene "${name}". Valid: ${Object.keys(SCENES).join(', ')}`);
     return;
@@ -269,7 +273,7 @@ async function goTo(name) {
   transitioning = true;
   try {
     if (current) {
-      await effects.fadeOut(400);
+      await effects.fadeOut(fadeOutMs, fadeColor);
       try { current.dispose?.(); } catch (e) { console.error(e); }
     }
     current = null;
@@ -301,7 +305,7 @@ async function goTo(name) {
     transitioning = false;
     perf.settle = 1; // don't judge performance on the frames around a scene change
   }
-  effects.fadeIn(400);
+  effects.fadeIn(fadeInMs); // fades in from whatever colour we faded out to
 }
 
 function disposeScene(scene) {

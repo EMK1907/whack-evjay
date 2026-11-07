@@ -15,7 +15,8 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // §6: a holographic Earth globe stands in another plaza on the ground. E on it → ERROR! glitch →
 // it becomes a miniature Quirkland (candy-strewn hills under a dome of grinning mouths) with a small
 // friendly fire hydrant on it → the whole dark world (everything in the `world` group) is pulled
-// into the globe → the camera zooms down into the hydrant → goTo('quirkland'). No text; ~7.4s.
+// into the globe → the camera dollies in until the globe fills the view, holds → white flash →
+// goTo('quirkland') fading in from white. No text; ~7.3s.
 //
 // Assets (assets/CREDITS.md) load through ctx.assets / ctx.setEnvironment; without them (e.g. in
 // Node tests) everything falls back to plain materials.
@@ -54,7 +55,8 @@ const T = {
   morphEnd: 2.2,   // …fully transformed
   pull: 3.2,       // the dark world starts being pulled into the globe…
   pullEnd: 5.0,    // …and is gone; the camera pushes in
-  zoomEnd: 7.0,    // camera reaches the fire hydrant's face → goTo('quirkland')
+  settle: 6.3,     // camera has eased to a stop with the globe filling the view (holds)
+  flash: 6.6,      // white flash (0.3s) → goTo('quirkland'), which fades in from white
 };
 
 // Post-processing looks: the dark night city needs an exposure lift under ACES and bloom on the
@@ -1476,31 +1478,30 @@ function startGlobeSequence() {
   away.normalize();
   g.mini.group.rotation.y = Math.atan2(-away.z, away.x);
 
-  // Where the dolly ends: just in front of the hydrant's face (mini world at its final size/pose).
-  g.globe.position.copy(GLOBE);
-  g.globe.scale.setScalar(1);
-  g.mini.group.position.set(0, 0, 0);
-  g.mini.group.scale.setScalar(1);
-  g.globe.updateMatrixWorld(true);
-  const h = g.mini.hydrant.group;
-  const face = h.localToWorld(new THREE.Vector3(0.045, 0.114, 0)); // middle of the face, between eyes and smile
-  const front = h.localToWorld(new THREE.Vector3(1, 0.114, 0)).sub(h.localToWorld(new THREE.Vector3(0, 0.114, 0))).normalize();
-  const end = face.clone().addScaledVector(front, 0.1);
+  // Where the dolly ends: far enough back that the whole mini world (mouth dome included) fills the
+  // view with a margin — computed from the camera's fov/aspect, so nothing gets cropped.
+  const centre = GLOBE.clone().add(new THREE.Vector3(0, 0.25, 0));
+  const halfV = THREE.MathUtils.degToRad(camera.fov / 2);
+  const halfH = Math.atan(Math.tan(halfV) * camera.aspect);
+  const fitDist = (DOME_R * 1.12) / Math.sin(Math.min(halfV, halfH));
+  const toCam = away.clone().multiplyScalar(Math.cos(0.2)).add(new THREE.Vector3(0, Math.sin(0.2), 0)).normalize();
+  const end = centre.clone().addScaledVector(toCam, fitDist);
 
-  // One continuous dolly: crane back/up to frame the globe, then glide straight in along the hydrant's gaze.
+  // One continuous dolly: crane back/up to frame the globe, then push in along the same line and settle.
   const startDist = Math.hypot(camera.position.x - GLOBE.x, camera.position.z - GLOBE.z);
-  const c1 = GLOBE.clone().addScaledVector(away, Math.max(startDist, 4.6)).setY(GLOBE.y + 1.6);
-  const c2 = end.clone().addScaledVector(front, 2.2).add(new THREE.Vector3(0, 0.35, 0));
+  const c1 = GLOBE.clone().addScaledVector(away, Math.max(startDist, fitDist + 1.4)).setY(GLOBE.y + 1.6);
+  const c2 = end.clone().addScaledVector(toCam, 1.2);
   const path = new THREE.CubicBezierCurve3(camera.position.clone(), c1, c2, end);
-  // Progress along the path over time: quick-ish crane, slow drift while the world is pulled in, then the push-in.
-  const progress = monotoneCurve([[0, 0], [1.9, 0.3], [T.pullEnd, 0.42], [T.zoomEnd, 1]]);
+  // Progress over time (monotone cubic → continuous speed): crane, slow drift during the pull-in, push-in, ease to a hold.
+  const progress = monotoneCurve([[0, 0], [1.9, 0.35], [T.pullEnd, 0.55], [T.settle, 1]]);
 
   const tone = (f, d, o) => () => audio.tone(f, d, o);
   const cues = [
     ...[523, 659, 784, 1047].map((f, i) => ({ at: T.morph + i * 0.12, fn: tone(f, 1.2, { type: 'sine', volume: 0.08 }) })),
     ...Array.from({ length: 8 }, (_, i) => ({ at: T.pull + i * 0.22, fn: tone(220 - i * 18, 0.35, { type: 'sawtooth', volume: 0.045 }) })),
     { at: T.pullEnd - 0.3, fn: tone(45, 1.0, { type: 'sine', volume: 0.35 }) },
-    ...Array.from({ length: 7 }, (_, i) => ({ at: T.pullEnd + 0.6 + i * 0.18, fn: tone(330 * Math.pow(1.19, i), 0.3, { type: 'sine', volume: 0.06 }) })),
+    ...Array.from({ length: 6 }, (_, i) => ({ at: T.pullEnd + 0.3 + i * 0.18, fn: tone(330 * Math.pow(1.19, i), 0.3, { type: 'sine', volume: 0.06 }) })),
+    ...[1047, 1319, 1568].map((f, i) => ({ at: T.flash + i * 0.04, fn: tone(f, 0.9, { type: 'sine', volume: 0.07 }) })), // shimmer with the flash
   ].sort((a, b) => a.at - b.at);
 
   seq = {
@@ -1508,8 +1509,7 @@ function startGlobeSequence() {
     qFrom: camera.quaternion.clone(),
     path,
     progress,
-    face,
-    lookAt: GLOBE.clone().add(new THREE.Vector3(0, 0.25, 0)),
+    lookAt: centre,
     look: new THREE.Vector3(),
     m: new THREE.Matrix4(),
     q: new THREE.Quaternion(),
@@ -1539,14 +1539,12 @@ function updateGlobeSequence(dt) {
 
   while (seq.cues.length && seq.cues[0].at <= t) seq.cues.shift().fn();
 
-  // ---- Camera: one continuous dolly; orientation eases from the player's view onto the globe, then the face.
+  // ---- Camera: one continuous dolly that settles with the globe filling the view; orientation eases from
+  // the player's view onto the globe.
   seq.path.getPointAt(clamp01(seq.progress(t)), camera.position);
-  seq.look.lerpVectors(seq.lookAt, seq.face, window01(t, T.pullEnd - 0.4, T.zoomEnd - 0.3));
-  seq.m.lookAt(camera.position, seq.look, camera.up);
+  seq.m.lookAt(camera.position, seq.lookAt, camera.up);
   seq.q.setFromRotationMatrix(seq.m);
   camera.quaternion.slerpQuaternions(seq.qFrom, seq.q, window01(t, 0, 1.3));
-  camera.fov = 75 - 25 * window01(t, T.pullEnd, T.zoomEnd);
-  camera.updateProjectionMatrix();
 
   // ---- Hologram: glitches during the ERROR, then expands a touch and fades out (anchored at its base).
   const morph = window01(t, T.morph, T.morphEnd);
@@ -1600,9 +1598,14 @@ function updateGlobeSequence(dt) {
     s.scene.fog.density = s.fogDensity * kk;
   }
 
-  if (t >= T.zoomEnd && !seq.left) {
-    seq.left = true;
-    ctx.goTo('quirkland');
+  // ---- White flash: the scene brightens while the screen fades to pure white, and Quirkland fades in from white.
+  if (t >= T.flash) {
+    if (!seq.left) {
+      seq.left = true;
+      ctx.goTo('quirkland', { fadeColor: '#fff', fadeOutMs: 300 });
+    }
+    const f = window01(t, T.flash, T.flash + 0.3);
+    ctx.post?.set({ exposure: POST_MINI.exposure * (1 + 2 * f), bloomStrength: POST_MINI.bloomStrength + 0.8 * f, bloomThreshold: POST_MINI.bloomThreshold * (1 - 0.6 * f) });
   }
 }
 

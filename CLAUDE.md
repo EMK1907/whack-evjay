@@ -13,7 +13,8 @@ First-person 3D browser game in Three.js. Full spec: docs/GAME.md — follow it 
 - src/scenes/: one file per scene: conveyor, fall, inverted, quirkland, ending.
   Each exports default { name, init(ctx), update(dt), dispose() }.
   ctx = { scene, camera, player, interact, dialogue, effects, audio, goTo(name), post, setEnvironment(url), assets }.
-  A scene ends by calling ctx.goTo('<next scene>').
+  A scene ends by calling ctx.goTo('<next scene>'). Optional transition: ctx.goTo(name, { fadeColor: '#fff', fadeOutMs: 300, fadeInMs: 400 })
+  — defaults are black, 400 ms out, 400 ms in; the next scene fades in from the same colour.
 
 ## Rendering, lighting & assets (src/main.js — use these, don't build your own)
 - Pipeline: ACES filmic tone mapping + sRGB output, PCF soft shadows, then post: SSAO → bloom → vignette → SMAA.
