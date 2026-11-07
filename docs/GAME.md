@@ -34,7 +34,7 @@ When it is the player's turn, something goes wrong.
 
 - The overhead sign turns red.
 - The entire environment turns red.
-- The words **ERROR!** appear everywhere in bubble writing.
+- Glitching, corrupted **ERROR!** text appears everywhere.
 - The sign changes to **DLROW** (only for the first cut scene).
 
 This should feel like a system malfunction.
@@ -169,7 +169,7 @@ The game ends.
 The game should maintain the atmosphere described in each section:
 
 - **Opening:** sterile, bright white, clinical and unsettling.
-- **Error sequence:** red lighting, visual glitches and repeated ERROR! text in bubble writing.
+- **Error sequence:** red lighting, visual glitches and repeated glitching, corrupted ERROR! text.
 - **Falling sequence:** upside-down London landmarks and a disorientating sense of falling.
 - **Inverted world:** dark red, gloomy and upside down.
 - **Quirkland:** a world containing the four elements — Air, Fire, Nature and Water.
