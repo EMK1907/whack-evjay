@@ -1,0 +1,40 @@
+# ===== OS / editor =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# ===== Secrets: never commit =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ===== Node / JS =====
+node_modules/
+dist/
+build/
+.next/
+npm-debug.log*
+yarn-error.log*
+
+# ===== Java =====
+*.class
+target/
+out/
+.gradle/
+
+# ===== Logs / misc =====
+*.log
+coverage/
