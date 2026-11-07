@@ -1,21 +1,26 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
-// Quirkland (Varshan) — docs/GAME.md §7–8.
-// A round world split into four corners around a central plaza:
-//   Air (north-east), Water (north-west), Nature (south-west), Fire (south-east).
-// Arrival → Fire Hydrant intro cutscene → he follows the player as a faded companion.
-// In the Water zone, E on the hydrant shows his (weak) ability.
-// Inhabitants (E): Ember the dragon (Fire), Skye the kite (Air), Sprout the beanstalk (Nature).
-// TEMP: the grey cube at the north edge goes to 'ending' until the masked figure (§9) is built.
+// Quirkland (Varshan) — docs/GAME.md §7–9.
+// A child's imagination: soft rolling green hills, wobbly paths and candy everywhere. There is no sky —
+// overhead is a bright patterned ceiling covered in identical big smiling mouths.
+// Arrival: the globe transition zooms into the Fire Hydrant; the camera pulls back to the player standing
+// right in front of him, and his intro cutscene plays. Afterwards he follows the player as a companion.
+// Every character has a `remembered` value (0–1) that controls how faded / desaturated they look.
+// Inhabitants so far (E): the Kite (Skye).
+// TEMP: the grey cube at the end of the north path goes to 'ending' until the masked figure (§9) is built.
 
 const NAME = 'quirkland';
 const NEXT = 'ending';
 const HYDRANT = 'Fire Hydrant';
 const HYDRANT_COLOR = '#ff9d92';
-const WORLD_R = 60;
-const PLAZA_R = 7;
 const FOLLOW_DIST = 2.2;
-const HYDRANT_OPACITY = 0.45;
+const PLAY_R = 50;              // walkable radius (invisible wall)
+const CEIL_R = 95, CEIL_H = 34; // ceiling dome (ellipsoid) radius / height
+const MOUTH_SIZE = 5.5;
+
+// How much children remember each character: 1 = bright and strong, 0 = gone.
+const REMEMBERED = { hydrant: 0.2, kite: 1.0 };
 
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 
@@ -26,32 +31,25 @@ const INTRO = [
   "Me? I'm a fire hydrant. I keep things safe. When fire gets out of hand, I put it out. That's my ability.",
   "But look at me. See how faded I am? Children don't think about fire hydrants anymore.",
   'The more a child forgets you, the more you fade. Your ability weakens. One day... you just aren\'t here.',
-  "The others — the dragon, the kite, the beanstalk — they're bright and strong. Children still dream about them every night.",
+  "The others — the kangaroo, the kite, the infernal one — they're bright and strong. Children still dream about them every night.",
   "Come on. I'll show you around. Stick close — I don't get to talk to anyone new.",
 ];
-
-// Each zone is a quarter of the disc. theta = start angle (0 = +x, counter-clockwise seen from above, toward -z).
-const ZONES = {
-  Air:    { theta: 0,               ground: 0xcfe0ff, hill: 0xf2f6ff, accent: '#7fb8ff' },
-  Water:  { theta: Math.PI * 0.5,   ground: 0x8fd0e6, hill: 0x6aa8e8, accent: '#3fa9ff' },
-  Nature: { theta: Math.PI,         ground: 0x5cbf4a, hill: 0x3f9a3a, accent: '#5fd35a' },
-  Fire:   { theta: Math.PI * 1.5,   ground: 0xc4501a, hill: 0x5a2a1c, accent: '#ff7a2f' },
-};
 
 // ---------- module state (reset in init/dispose) ----------
 let ctx = null;
 let gen = 0;          // bumps every init/dispose so stale async sequences stop
 let tasks = [];       // per-frame callbacks; return false to remove
 let systems = [];     // particle systems
+let fadables = [];    // characters with a `remembered` value
 let time = 0;
 let rand = Math.random;
 let pxScale = 700;
 let hydrant = null;
 let state = 'intro';  // 'intro' | 'free'
 let busy = false;     // an ability / conversation is playing
-let zone = null;
-let toastEl = null;
-let toastTimer = null;
+let pathPts = [];     // sampled path centre points (keeps props off the paths)
+let pathEnds = [];
+let props = [];       // occupied [x, z, radius]
 
 const alive = (g) => ctx !== null && g === gen;
 
@@ -72,7 +70,8 @@ function tween(sec, fn) {
 }
 const wait = (sec) => tween(sec, () => {});
 const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-const easeOutBack = (t) => 1 + 2.7 * Math.pow(t - 1, 3) + 1.7 * Math.pow(t - 1, 2);
+const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 
 function lerpAngle(a, b, k) {
   let d = (b - a) % (Math.PI * 2);
@@ -90,24 +89,8 @@ function mulberry32(seed) {
   };
 }
 
-const polar = (theta, r) => V(Math.cos(theta) * r, 0, -Math.sin(theta) * r);
-const zoneMid = (name) => ZONES[name].theta + Math.PI / 4;
-const zoneCenter = (name, r = 24) => polar(zoneMid(name), r);
-
-function randInZone(name, rMin, rMax, margin = 0.1) {
-  const th = ZONES[name].theta + margin + rand() * (Math.PI / 2 - margin * 2);
-  const r = Math.sqrt(rMin * rMin + rand() * (rMax * rMax - rMin * rMin));
-  return polar(th, r);
-}
-
-function zoneAt(p) {
-  if (p.x * p.x + p.z * p.z < PLAZA_R * PLAZA_R) return null;
-  if (p.z < 0) return p.x >= 0 ? 'Air' : 'Water';
-  return p.x >= 0 ? 'Fire' : 'Nature';
-}
-
 function std(color, extra = {}) {
-  return new THREE.MeshStandardMaterial({ color, roughness: 0.8, ...extra });
+  return new THREE.MeshStandardMaterial({ color, roughness: 0.6, ...extra });
 }
 
 function mesh(geo, mat, x = 0, y = 0, z = 0, parent = ctx.scene) {
@@ -119,16 +102,16 @@ function mesh(geo, mat, x = 0, y = 0, z = 0, parent = ctx.scene) {
 
 function collide(obj) { ctx.player.colliders.push(obj); return obj; }
 
-function makeLabel(text, { color = '#fff', bg = 'rgba(0,0,0,0.55)', w = 3, font = "700 64px 'Rubik Bubbles', system-ui, sans-serif" } = {}) {
+function makeLabel(text, { w = 2.4 } = {}) {
   const c = document.createElement('canvas');
   c.width = 512; c.height = 128;
   const g = c.getContext('2d');
-  g.fillStyle = bg;
+  g.fillStyle = 'rgba(0,0,0,0.55)';
   g.beginPath();
   g.roundRect(4, 4, c.width - 8, c.height - 8, 56);
   g.fill();
-  g.fillStyle = color;
-  g.font = font;
+  g.fillStyle = '#fff';
+  g.font = '700 54px system-ui, sans-serif';
   g.textAlign = 'center';
   g.textBaseline = 'middle';
   g.fillText(text, c.width / 2, c.height / 2 + 4);
@@ -137,6 +120,65 @@ function makeLabel(text, { color = '#fff', bg = 'rgba(0,0,0,0.55)', w = 3, font 
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex }));
   sprite.scale.set(w, w / 4, 1);
   return sprite;
+}
+
+// ---------- terrain height ----------
+const HILLS = [[20, -16, 4.5, 7], [-24, 10, 5, 9], [8, 27, 3.5, 6.5], [-15, -27, 4.5, 8], [31, 13, 3.2, 7], [-33, -8, 3.8, 7]];
+
+/** Ground height at (x, z): flat meadow at the arrival point, rolling hills, rising to big rounded hills at the rim. */
+function H(x, z) {
+  const r = Math.hypot(x, z);
+  let h = 0.9 * Math.sin(x * 0.09 + 0.5) * Math.cos(z * 0.08 - 0.3)
+        + 0.6 * Math.sin(x * 0.17 + z * 0.05 + 1.3)
+        + 0.45 * Math.cos(z * 0.15 - x * 0.07 + 2.1);
+  h *= smooth(4, 16, r);
+  for (const [hx, hz, a, s] of HILLS) {
+    const dx = x - hx, dz = z - hz;
+    h += a * Math.exp(-(dx * dx + dz * dz) / (s * s));
+  }
+  return h + Math.pow(smooth(44, 76, r), 1.4) * 36;
+}
+
+// ---------- fading: remembered 0..1 → transparency + desaturation ----------
+const _hsl = {};
+function makeFadable(root, remembered) {
+  const seen = new Set();
+  const entries = [];
+  root.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+    for (const m of mats) {
+      if (seen.has(m) || !m.color) continue;
+      seen.add(m);
+      entries.push({ m, color: m.color.clone(), emissive: m.emissive ? m.emissive.clone() : null, k: m.userData.k || 1 });
+    }
+  });
+  const rec = { root, entries, remembered, dip: 1 };
+  if (remembered < 0.999) for (const e of entries) e.m.transparent = true;
+  applyFade(rec, 1);
+  fadables.push(rec);
+  return rec;
+}
+
+function applyFade(rec, flicker) {
+  const r = Math.min(1, Math.max(0, rec.remembered));
+  const sat = 0.3 + 0.7 * r;
+  const opacity = (0.3 + 0.7 * r) * flicker * rec.dip;
+  for (const e of rec.entries) {
+    e.color.getHSL(_hsl);
+    e.m.color.setHSL(_hsl.h, _hsl.s * sat, _hsl.l + (1 - r) * 0.2 * (0.65 - _hsl.l));
+    if (e.emissive) e.m.emissive.copy(e.emissive).multiplyScalar(r);
+    if (e.m.transparent) e.m.opacity = Math.min(1, opacity * e.k);
+  }
+}
+
+function updateFades() {
+  for (const f of fadables) {
+    const lost = 1 - f.remembered;
+    if (lost < 0.01 && f.dip === 1) continue;
+    // The more forgotten, the more they shimmer and flicker — barely holding on.
+    const flicker = (1 - lost * 0.2 * (0.5 + 0.5 * Math.sin(time * 2.3))) * (Math.random() < lost * 0.02 ? 0.45 : 1);
+    applyFade(f, flicker);
+  }
 }
 
 // ---------- particles (soft round points with per-particle fade) ----------
@@ -215,346 +257,400 @@ class Particles {
 
 // ---------- world ----------
 function buildWorld() {
-  const { scene, player } = ctx;
+  const { scene } = ctx;
+  scene.background = new THREE.Color(0xffd6ea);
+  scene.fog = new THREE.Fog(0xfff0dc, 80, 200);
+  scene.add(new THREE.HemisphereLight(0xfff4e0, 0x8fdc70, 1.5));
+  const key = new THREE.DirectionalLight(0xfff0d8, 1.8);
+  key.position.set(20, 40, 15);
+  scene.add(key);
+  // Soft glow from the middle of the world so the inward-facing rim hills stay bright.
+  const fill = new THREE.PointLight(0xfff3e0, 1.1, 0, 0);
+  fill.position.set(0, 22, 0);
+  scene.add(fill);
 
-  // Pastel dream sky.
-  const sky = new THREE.Mesh(new THREE.SphereGeometry(450, 32, 16), new THREE.ShaderMaterial({
-    side: THREE.BackSide, depthWrite: false, fog: false,
-    uniforms: { top: { value: new THREE.Color(0x5fb0ff) }, bottom: { value: new THREE.Color(0xffd9ef) } },
-    vertexShader: 'varying vec3 vP; void main() { vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-    fragmentShader: `uniform vec3 top; uniform vec3 bottom; varying vec3 vP;
-      void main() { gl_FragColor = vec4(mix(bottom, top, clamp(vP.y * 1.8 + 0.1, 0.0, 1.0)), 1.0);
-      #include <colorspace_fragment>
-      }`,
-  }));
-  scene.add(sky);
-  scene.background = new THREE.Color(0xffd9ef);
-  scene.fog = new THREE.Fog(0xffd9ef, 70, 170);
+  buildTerrain();
+  buildCeiling();
+  buildPaths();
+  buildCandy();
+  buildTrees();
 
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x99bb88, 1.5));
-  const sun = new THREE.DirectionalLight(0xfff2dd, 2);
-  sun.position.set(30, 50, 20);
-  scene.add(sun);
-
-  // Ground: four quarter-discs (colliders), sandy plaza, paths, signs.
-  for (const z of Object.values(ZONES)) {
-    const m = mesh(new THREE.CircleGeometry(WORLD_R, 24, z.theta, Math.PI / 2), std(z.ground, { roughness: 0.95 }));
-    m.rotation.x = -Math.PI / 2;
-    collide(m);
-  }
-  const plaza = mesh(new THREE.CircleGeometry(PLAZA_R, 48), std(0xf3e3bf), 0, 0.01, 0);
-  plaza.rotation.x = -Math.PI / 2;
-  const rim = mesh(new THREE.RingGeometry(PLAZA_R, PLAZA_R + 0.4, 48), std(0xffffff), 0, 0.015, 0);
-  rim.rotation.x = -Math.PI / 2;
-
-  const pathMat = std(0xf6ead0);
-  for (const [name, z] of Object.entries(ZONES)) {
-    const th = zoneMid(name);
-    const g = new THREE.Group();
-    g.rotation.y = th - Math.PI / 2;
-    scene.add(g);
-    const path = mesh(new THREE.PlaneGeometry(2.2, 12), pathMat, 0, 0.012, -(PLAZA_R + 6), g);
-    path.rotation.x = -Math.PI / 2;
-
-    // Signpost at the edge of the plaza.
-    const p = polar(th, PLAZA_R + 1.5);
-    mesh(new THREE.CylinderGeometry(0.07, 0.07, 2, 8), std(0xffffff), p.x, 1, p.z);
-    const label = makeLabel(name.toUpperCase(), { color: z.accent, bg: 'rgba(255,255,255,0.92)', w: 2.6 });
-    label.position.set(p.x, 2.3, p.z);
-    scene.add(label);
-  }
-
-  // Invisible boundary wall.
-  const wall = mesh(new THREE.CylinderGeometry(WORLD_R - 1, WORLD_R - 1, 8, 48, 1, true),
-    new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }), 0, 4, 0);
+  // Invisible boundary wall (the rim hills rise behind it).
+  const wall = mesh(new THREE.CylinderGeometry(PLAY_R, PLAY_R, 40, 64, 1, true),
+    new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }), 0, 10, 0);
   wall.visible = false;
   collide(wall);
-
-  // Distant hills, tinted by the zone behind them.
-  const hillGeo = new THREE.ConeGeometry(1, 1, 7);
-  for (let i = 0; i < 44; i++) {
-    const th = (i / 44) * Math.PI * 2 + rand() * 0.05;
-    const name = zoneAt(polar(th, 10));
-    const r = 66 + rand() * 14;
-    const h = 8 + rand() * 16;
-    const p = polar(th, r);
-    const m = mesh(hillGeo, std(ZONES[name].hill, { flatShading: true }), p.x, h / 2 - 0.5, p.z);
-    m.scale.set(6 + rand() * 6, h, 6 + rand() * 6);
-  }
-
-  buildAir();
-  buildFire();
-  buildNature();
-  buildWater();
-
-  // TEMP exit until the masked figure (§9) is built.
-  const cube = mesh(new THREE.BoxGeometry(1, 1, 1), std(0x888888), 0, 0.5, -52);
-  collide(cube);
-  ctx.interact.add(cube, () => ctx.goTo(NEXT));
-  const tmp = makeLabel('TEMP → ending', { w: 2.4, font: '700 54px system-ui, sans-serif' });
-  tmp.position.set(0, 1.6, -52);
-  scene.add(tmp);
 }
 
-function buildAir() {
-  const white = std(0xffffff, { roughness: 1, emissive: 0xdfe8ff, emissiveIntensity: 0.3 });
-  const puff = new THREE.SphereGeometry(1, 14, 10);
-  for (let i = 0; i < 16; i++) {
-    const c = new THREE.Group();
-    const n = 4 + Math.floor(rand() * 3);
-    for (let j = 0; j < n; j++) {
-      const s = mesh(puff, white, (j - n / 2) * 0.9 + rand() * 0.4, rand() * 0.5, rand() * 0.8 - 0.4, c);
-      s.scale.setScalar(0.8 + rand() * 0.7);
+function buildTerrain() {
+  // Split into chunks so the player's raycasts only test nearby triangles.
+  const SIZE = 160, CHUNKS = 8, SEG = 32, cs = SIZE / CHUNKS;
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92 });
+  const cA = new THREE.Color(0x63dd48), cB = new THREE.Color(0xa6ec4c), cC = new THREE.Color(0x3fd27a);
+  const sun = new THREE.Color(0xd8f56a), pastel = new THREE.Color(), col = new THREE.Color();
+  const n = new THREE.Vector3();
+  const e = 0.25;
+  for (let cx = 0; cx < CHUNKS; cx++) {
+    for (let cz = 0; cz < CHUNKS; cz++) {
+      const ox = -SIZE / 2 + cs * (cx + 0.5), oz = -SIZE / 2 + cs * (cz + 0.5);
+      const geo = new THREE.PlaneGeometry(cs, cs, SEG, SEG).rotateX(-Math.PI / 2).translate(ox, 0, oz);
+      const pos = geo.attributes.position, nor = geo.attributes.normal;
+      const colors = new Float32Array(pos.count * 3);
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), z = pos.getZ(i);
+        const h = H(x, z);
+        pos.setY(i, h);
+        n.set(H(x - e, z) - H(x + e, z), 2 * e, H(x, z - e) - H(x, z + e)).normalize();
+        nor.setXYZ(i, n.x, n.y, n.z);
+
+        // Bright grass with soft colour patches; rim hills fade into a pastel rainbow.
+        const r = Math.hypot(x, z);
+        const v = 0.5 + 0.5 * Math.sin(x * 0.21 + Math.cos(z * 0.17) * 2) * Math.cos(z * 0.19 - x * 0.05);
+        col.copy(cA).lerp(cB, v * 0.6);
+        col.lerp(cC, smooth(0.3, 1, Math.sin(x * 0.07 - z * 0.11) * 0.5 + 0.5) * 0.35);
+        col.lerp(sun, smooth(2.5, 5, h) * (1 - smooth(46, 60, r)) * 0.4);
+        pastel.setHSL(((Math.atan2(z, x) / (Math.PI * 2)) + 1) % 1, 0.85, 0.8);
+        col.lerp(pastel, smooth(46, 68, r) * 0.85);
+        colors.set([col.r, col.g, col.b], i * 3);
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+      geo.computeBoundingSphere();
+      geo.computeBoundingBox();
+      collide(mesh(geo, mat));
     }
-    const p = randInZone('Air', 10, 55);
-    const baseY = 4 + rand() * 9;
-    c.position.set(p.x, baseY, p.z);
-    c.scale.setScalar(0.8 + rand() * 0.9);
-    ctx.scene.add(c);
-    const ph = rand() * 6.28, sp = 0.3 + rand() * 0.4;
-    every(() => { c.position.y = baseY + Math.sin(time * sp + ph) * 0.5; });
-  }
-
-  // Pinwheels.
-  const stick = std(0xf5f0e6);
-  const bladeShape = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(0.5, 0.1), new THREE.Vector2(0.15, 0.5)]);
-  const bladeGeo = new THREE.ShapeGeometry(bladeShape);
-  const colors = [0xff6fae, 0xffd23f, 0x5ad1ff, 0x9b7bff];
-  for (let i = 0; i < 9; i++) {
-    const g = new THREE.Group();
-    const p = randInZone('Air', 9, 50);
-    g.position.copy(p);
-    g.rotation.y = rand() * 6.28;
-    ctx.scene.add(g);
-    mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.6, 6), stick, 0, 0.8, 0, g);
-    const wheel = new THREE.Group();
-    wheel.position.set(0, 1.6, 0.06);
-    g.add(wheel);
-    for (let b = 0; b < 4; b++) {
-      const m = mesh(bladeGeo, std(colors[b], { side: THREE.DoubleSide, emissive: colors[b], emissiveIntensity: 0.2 }), 0, 0, 0, wheel);
-      m.rotation.z = (b * Math.PI) / 2;
-    }
-    const sp = 3 + rand() * 4;
-    every((dt) => { wheel.rotation.z -= dt * sp; });
-  }
-
-  // Floating islands.
-  for (let i = 0; i < 5; i++) {
-    const g = new THREE.Group();
-    const p = randInZone('Air', 16, 50);
-    const baseY = 2.5 + rand() * 4;
-    g.position.set(p.x, baseY, p.z);
-    ctx.scene.add(g);
-    const s = 1 + rand() * 1.2;
-    const rock = mesh(new THREE.ConeGeometry(1.4 * s, 2 * s, 7), std(0xb99a7a, { flatShading: true }), 0, -s, 0, g);
-    rock.rotation.x = Math.PI;
-    mesh(new THREE.CylinderGeometry(1.45 * s, 1.45 * s, 0.25, 7), std(0x8fe08a, { flatShading: true }), 0, 0.1, 0, g);
-    const ph = rand() * 6.28;
-    every(() => { g.position.y = baseY + Math.sin(time * 0.6 + ph) * 0.35; g.rotation.y += 0.002; });
-  }
-
-  // Wind streaks drifting across the zone.
-  const streakMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
-  const streakGeo = new THREE.PlaneGeometry(3, 0.05);
-  for (let i = 0; i < 28; i++) {
-    const p = randInZone('Air', 8, 50);
-    const m = mesh(streakGeo, streakMat, p.x, 0.6 + rand() * 6, p.z);
-    m.rotation.x = rand() * Math.PI;
-    const x0 = p.x - 8, sp = 6 + rand() * 6;
-    m.position.x = x0 + rand() * 16;
-    every((dt) => { m.position.x += dt * sp; if (m.position.x > x0 + 16) m.position.x = x0; });
   }
 }
 
-function buildFire() {
-  const emberAt = zoneCenter('Fire', 27); // keep her clearing free
-  // Lava pools.
-  const rockMat = std(0x3b2622, { flatShading: true });
-  for (let i = 0; i < 6; i++) {
-    const p = randInZone('Fire', 12, 50);
-    if (p.distanceTo(emberAt) < 11) continue;
-    const r = 1.2 + rand() * 2.2;
-    const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff6a10 });
-    const lava = mesh(new THREE.CircleGeometry(r, 24), lavaMat, p.x, 0.02, p.z);
-    lava.rotation.x = -Math.PI / 2;
-    const ring = mesh(new THREE.RingGeometry(r, r + 0.4, 24), rockMat, p.x, 0.025, p.z);
-    ring.rotation.x = -Math.PI / 2;
-    const ph = rand() * 6.28;
-    every(() => { lavaMat.color.setHSL(0.06 + Math.sin(time * 1.5 + ph) * 0.02, 1, 0.52); });
+function buildCeiling() {
+  // Bright childlike pattern: soft rainbow swirl bands with polka dots.
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(CEIL_R, 128, 64, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.ShaderMaterial({
+    side: THREE.BackSide, fog: false,
+    uniforms: { time: { value: 0 } },
+    vertexShader: 'varying vec3 vP; void main() { vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: `
+      uniform float time; varying vec3 vP;
+      vec3 hsl2rgb(vec3 c) {
+        vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+        return c.z + c.y * (rgb - 0.5) * (1.0 - abs(2.0 * c.z - 1.0));
+      }
+      void main() {
+        float az = atan(vP.z, vP.x) / 6.28318;
+        float el = vP.y;
+        float s = az * 3.0 + el * 3.5 + time * 0.01;
+        float band = s * 6.0;
+        float f = fract(band);
+        float hue = (floor(band) + smoothstep(0.82, 1.0, f)) / 6.0;
+        vec3 col = hsl2rgb(vec3(fract(hue), 0.8, 0.8));
+        vec2 uv = vec2(az * 40.0, el * 18.0);
+        float dots = 1.0 - smoothstep(0.17, 0.22, length(fract(uv) - 0.5));
+        col = mix(col, vec3(1.0, 0.98, 0.92), dots * 0.8);
+        gl_FragColor = vec4(pow(col, vec3(2.2)), 1.0);
+        #include <colorspace_fragment>
+      }`,
+  }));
+  dome.scale.y = CEIL_H / CEIL_R;
+  ctx.scene.add(dome);
+  every(() => { dome.material.uniforms.time.value = time; });
+
+  // One mouth design, copied all over the ceiling — identical, and all moving in perfect sync.
+  const yU = (x) => 0.05 + 0.25 * x * x;    // upper lip line
+  const yL = (x) => -0.75 + 1.05 * x * x;   // lower lip line (big open grin)
+  const outline = [];
+  for (let i = 0; i <= 14; i++) { const x = -1 + (2 * i) / 14; outline.push(new THREE.Vector2(x, yU(x))); }
+  for (let i = 13; i >= 1; i--) { const x = -1 + (2 * i) / 14; outline.push(new THREE.Vector2(x, yL(x))); }
+  const lipGeo = new THREE.TubeGeometry(
+    new THREE.CatmullRomCurve3(outline.map((p) => V(p.x, p.y, 0)), true, 'centripetal'), 240, 0.075, 16, true);
+  const innerGeo = new THREE.ShapeGeometry(new THREE.Shape(outline), 24);
+  const teeth = [];
+  for (let i = 0; i < 7; i++) {
+    const x = -0.6 + i * 0.2;
+    teeth.push(new THREE.CapsuleGeometry(0.065, 0.06, 8, 16).scale(1, 1, 0.45).translate(x, yU(x) - 0.1, 0.02));
   }
+  const teethGeo = mergeGeometries(teeth);
+  const tongueGeo = new THREE.SphereGeometry(1, 32, 16).scale(0.36, 0.16, 0.07);
+  const dimpleGeo = new THREE.SphereGeometry(0.06, 16, 12);
 
-  // Volcanic rocks.
-  const rockGeo = new THREE.DodecahedronGeometry(1, 0);
-  for (let i = 0; i < 16; i++) {
-    const p = randInZone('Fire', 10, 54);
-    if (p.distanceTo(emberAt) < 9) continue;
-    const s = 0.5 + rand() * 1.3;
-    const m = mesh(rockGeo, rockMat, p.x, s * 0.4, p.z);
-    m.scale.set(s, s * 0.8, s);
-    m.rotation.set(rand() * 3, rand() * 3, rand() * 3);
-    if (s > 1) collide(m);
+  const lipMat = std(0xff3d64, { roughness: 0.3, emissive: 0xa0102c, emissiveIntensity: 0.6, fog: false });
+  const innerMat = new THREE.MeshBasicMaterial({ color: 0x4a0618, side: THREE.DoubleSide, fog: false });
+  const toothMat = std(0xffffff, { roughness: 0.25, emissive: 0xfff4ea, emissiveIntensity: 0.55, fog: false });
+  const tongueMat = std(0xff7a9a, { roughness: 0.5, emissive: 0xc03050, emissiveIntensity: 0.5, fog: false });
+
+  const mouths = [];
+  const tongues = [];
+  const n = V(0, 0, 0), p = V(0, 0, 0), toEye = V(0, 0, 0), face = V(0, 0, 0);
+  const rings = [[0, 1, 0], [17, 6, 0.3], [31, 10, 0], [44, 13, 0.2], [57, 17, 0.1]];
+  for (const [rho, count, off] of rings) {
+    for (let i = 0; i < count; i++) {
+      const th = (i / count) * Math.PI * 2 + off;
+      const y = CEIL_H * Math.sqrt(1 - (rho / CEIL_R) ** 2);
+      p.set(Math.cos(th) * rho, y, Math.sin(th) * rho);
+      n.set(p.x / (CEIL_R * CEIL_R), p.y / (CEIL_H * CEIL_H), p.z / (CEIL_R * CEIL_R)).normalize();
+      const g = new THREE.Group();
+      // Face partly toward the middle of the world, so they look down at whoever is there.
+      toEye.set(-p.x, 2 - p.y, -p.z).normalize();
+      face.copy(n).negate().lerp(toEye, 0.55).normalize();
+      g.position.copy(p).addScaledVector(n, -1.4);
+      if (rho === 0) g.up.set(0, 0, -1);
+      g.lookAt(g.position.x + face.x, g.position.y + face.y, g.position.z + face.z);
+      ctx.scene.add(g);
+      const inner = new THREE.Group(); // the part that animates
+      g.add(inner);
+      mesh(innerGeo, innerMat, 0, 0, -0.02, inner);
+      mesh(lipGeo, lipMat, 0, 0, 0, inner);
+      mesh(teethGeo, toothMat, 0, 0, 0, inner);
+      tongues.push(mesh(tongueGeo, tongueMat, 0, -0.52, 0.01, inner));
+      for (const sx of [-1, 1]) mesh(dimpleGeo, lipMat, sx * 1.1, 0.3, 0, inner);
+      mouths.push(inner);
+    }
   }
+  every(() => {
+    // Slow synchronized breathing, and every few seconds they all grin wider at once.
+    const breathe = Math.sin(time * 1.3);
+    const grin = Math.pow(Math.max(0, Math.sin(time * 0.7)), 12);
+    const sx = MOUTH_SIZE * (1 + grin * 0.14), sy = MOUTH_SIZE * (1 + breathe * 0.06 + grin * 0.12);
+    for (const m of mouths) m.scale.set(sx, sy, MOUTH_SIZE);
+    const tx = Math.sin(time * 2) * 0.05;
+    for (const t of tongues) t.position.x = tx;
+  });
+}
 
-  // Volcano with a glowing crater.
-  const vp = polar(zoneMid('Fire'), 46);
-  collide(mesh(new THREE.ConeGeometry(9, 12, 18), std(0x4a2b22, { flatShading: true }), vp.x, 6, vp.z));
-  mesh(new THREE.SphereGeometry(2.3, 16, 10), new THREE.MeshBasicMaterial({ color: 0xff7a1a }), vp.x, 11.4, vp.z);
+function ribbon(curve, { closed = false, width = 2, color, y = 0.05, N = 260, wobble = 0.25, seed = 0, offset = -1, record = false }) {
+  const pos = [], idx = [];
+  const p = V(0, 0, 0), tan = V(0, 0, 0);
+  for (let i = 0; i <= N; i++) {
+    const t = closed ? (i / N) % 1 : i / N;
+    curve.getPointAt(t, p);
+    curve.getTangentAt(t, tan);
+    const l = Math.hypot(tan.x, tan.z) || 1;
+    const sx = -tan.z / l, sz = tan.x / l;
+    const w = (width * (1 + wobble * Math.sin(i / N * 37 + seed) * Math.sin(i / N * 13 + seed * 2))) / 2;
+    for (const s of [-1, 1]) {
+      const x = p.x + sx * w * s, z = p.z + sz * w * s;
+      pos.push(x, H(x, z) + y, z);
+    }
+    if (i < N) { const a = i * 2; idx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+    if (record && i % 4 === 0) pathPts.push([p.x, p.z]);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const mat = std(color, { roughness: 0.85, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: offset, polygonOffsetUnits: offset });
+  return mesh(geo, mat);
+}
 
-  // Embers drifting up everywhere in the zone, and out of the crater.
-  const embers = new Particles({ count: 260, color: 0xffc04a, color2: 0xff2a00, size: 0.12, gravity: -0.5 });
-  let acc = 0;
-  every((dt) => {
-    acc += dt * 40;
-    while (acc > 1) {
-      acc--;
-      if (rand() < 0.3) {
-        embers.emit(V(vp.x + (rand() - 0.5) * 3, 12, vp.z + (rand() - 0.5) * 3), V((rand() - 0.5) * 2, 3 + rand() * 2, (rand() - 0.5) * 2), 3, 0.3);
-      } else {
-        const p = randInZone('Fire', 8, 52, 0.02);
-        embers.emit(V(p.x, 0.1, p.z), V((rand() - 0.5) * 0.6, 0.8 + rand() * 1.2, (rand() - 0.5) * 0.6), 3 + rand() * 2);
+function wobblyPath(points, opts) {
+  const curve = new THREE.CatmullRomCurve3(points.map(([x, z]) => V(x, 0, z)), !!opts.closed, 'centripetal');
+  ribbon(curve, { ...opts, width: opts.width + 0.7, color: 0xffbf73, y: 0.04, offset: -1 });  // soft border
+  ribbon(curve, { ...opts, color: 0xffe6b8, y: 0.07, offset: -2, record: true });                // path
+  return curve;
+}
+
+function buildPaths() {
+  // Wobbly ring around the arrival meadow.
+  const ring = [];
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2, r = 7 + Math.sin(i * 1.7) * 0.8;
+    ring.push([Math.cos(a) * r, Math.sin(a) * r]);
+  }
+  wobblyPath(ring, { closed: true, width: 1.8, seed: 1 });
+
+  // Paths wandering out towards the hills (the first one heads north, -z).
+  const starts = [1.5 * Math.PI, 0.25, 1.2, 2.3, 3.4, 4.4];
+  starts.forEach((a0, k) => {
+    const pts = [];
+    for (let r = 7; r <= 46; r += 4) {
+      const a = a0 + Math.sin(r * 0.13 + k * 2.1) * 0.32;
+      pts.push([Math.cos(a) * r, Math.sin(a) * r]);
+    }
+    wobblyPath(pts, { width: 2, seed: k * 3 + 2 });
+    pathEnds.push(pts[pts.length - 1]);
+  });
+}
+
+function freeSpot(rMin, rMax, radius, pathClear = 2.2) {
+  for (let tries = 0; tries < 40; tries++) {
+    const a = rand() * Math.PI * 2;
+    const r = Math.sqrt(rMin * rMin + rand() * (rMax * rMax - rMin * rMin));
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (pathPts.some(([px, pz]) => (px - x) ** 2 + (pz - z) ** 2 < (radius + pathClear) ** 2)) continue;
+    if (props.some(([px, pz, pr]) => (px - x) ** 2 + (pz - z) ** 2 < (radius + pr + 0.8) ** 2)) continue;
+    props.push([x, z, radius]);
+    return [x, z];
+  }
+  return null;
+}
+
+// ---------- candy ----------
+const texCache = new Map();
+function canvasTex(key, draw, size = 256) {
+  if (texCache.has(key)) return texCache.get(key);
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  draw(c.getContext('2d'), size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  texCache.set(key, tex);
+  return tex;
+}
+
+function swirlTex(c1, c2) {
+  return canvasTex(`swirl${c1}${c2}`, (g, s) => {
+    const m = s / 2;
+    for (let r = m; r > 0; r -= 1.5) {
+      for (let k = 0; k < 8; k++) {
+        g.fillStyle = k % 2 ? c1 : c2;
+        g.beginPath();
+        g.moveTo(m, m);
+        g.arc(m, m, r, (k * Math.PI) / 4 + r * 0.045, ((k + 1) * Math.PI) / 4 + r * 0.045);
+        g.fill();
       }
     }
   });
 }
 
-function buildNature() {
-  const sproutAt = zoneCenter('Nature');
-  const trunkMat = std(0x7a4a2a);
-  const leafMats = [0x3fae3a, 0x67c94a, 0x2f8f4a].map((c) => std(c, { flatShading: true }));
-  for (let i = 0; i < 20; i++) {
-    const p = randInZone('Nature', 10, 55);
-    if (p.distanceTo(sproutAt) < 7) continue;
-    const h = 2.5 + rand() * 2.5;
-    collide(mesh(new THREE.CylinderGeometry(0.25, 0.4, h, 8), trunkMat, p.x, h / 2, p.z));
-    const c = mesh(new THREE.IcosahedronGeometry(1.6 + rand() * 0.9, 0), leafMats[i % 3], p.x, h + 0.8, p.z);
-    c.rotation.set(rand(), rand(), rand());
-  }
-
-  const stemGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.4, 4);
-  const stemMat = std(0x2f8f3a);
-  const headGeo = new THREE.SphereGeometry(0.1, 8, 6);
-  const petalMats = [0xff5fa2, 0xffe14d, 0xffffff, 0xb57bff, 0xff8a3d].map((c) => std(c, { emissive: c, emissiveIntensity: 0.15 }));
-  for (let i = 0; i < 80; i++) {
-    const p = randInZone('Nature', 8, 55, 0.03);
-    mesh(stemGeo, stemMat, p.x, 0.2, p.z);
-    mesh(headGeo, petalMats[i % petalMats.length], p.x, 0.42, p.z);
-  }
-
-  const capMat = std(0xe8433f), spotMat = std(0xffffff), mStem = std(0xf4e9d4);
-  for (let i = 0; i < 9; i++) {
-    const p = randInZone('Nature', 9, 50);
-    const s = 0.6 + rand() * 1.2;
-    const g = new THREE.Group();
-    g.position.copy(p); g.scale.setScalar(s);
-    ctx.scene.add(g);
-    mesh(new THREE.CylinderGeometry(0.12, 0.16, 0.5, 8), mStem, 0, 0.25, 0, g);
-    mesh(new THREE.SphereGeometry(0.42, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), capMat, 0, 0.45, 0, g);
-    for (let k = 0; k < 5; k++) {
-      const a = k * 1.26, sp = mesh(new THREE.SphereGeometry(0.06, 6, 4), spotMat, Math.cos(a) * 0.28, 0.72, Math.sin(a) * 0.28, g);
-      sp.scale.y = 0.5;
+function stripeTex(c1, c2, repeat = 1) {
+  const base = canvasTex(`stripe${c1}${c2}`, (g, s) => {
+    g.fillStyle = c1;
+    g.fillRect(0, 0, s, s);
+    g.fillStyle = c2;
+    for (let i = -2; i < 4; i++) {
+      g.beginPath();
+      g.moveTo(i * s / 2, 0); g.lineTo(i * s / 2 + s / 4, 0);
+      g.lineTo(i * s / 2 + s / 4 + s, s); g.lineTo(i * s / 2 + s, s);
+      g.fill();
     }
-  }
+  }, 128);
+  const t = base.clone();
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repeat, 1);
+  t.needsUpdate = true;
+  return t;
+}
 
-  // Butterflies.
-  const wingGeoR = new THREE.PlaneGeometry(0.22, 0.16).translate(0.11, 0, 0).rotateX(-Math.PI / 2);
-  const wingGeoL = new THREE.PlaneGeometry(0.22, 0.16).translate(-0.11, 0, 0).rotateX(-Math.PI / 2);
-  for (let i = 0; i < 10; i++) {
-    const col = [0xff7ad9, 0xffd23f, 0x7ad9ff, 0xffffff][i % 4];
-    const wm = new THREE.MeshBasicMaterial({ color: col, side: THREE.DoubleSide });
-    const b = new THREE.Group();
-    ctx.scene.add(b);
-    const wr = mesh(wingGeoR, wm, 0, 0, 0, b), wl = mesh(wingGeoL, wm, 0, 0, 0, b);
-    const home = randInZone('Nature', 10, 45);
-    const ph = rand() * 6.28, sp = 0.5 + rand() * 0.5;
-    every(() => {
-      const t = time * sp + ph;
-      b.position.set(home.x + Math.sin(t) * 3, 1 + Math.sin(t * 2.3) * 0.5 + 0.5, home.z + Math.cos(t * 0.7) * 3);
-      b.rotation.y = -t;
-      const f = Math.sin(time * 18 + ph) * 0.9;
-      wr.rotation.z = f; wl.rotation.z = -f;
-    });
+const CANDY = [['#ff4f8b', '#ffffff'], ['#ffb02e', '#fff3c4'], ['#7b6cff', '#ffffff'], ['#29c7b8', '#e9fffb'], ['#ff5a3c', '#ffe14d']];
+
+function placeOnGround(obj, x, z, sink = 0.05) {
+  obj.position.set(x, H(x, z) - sink, z);
+  ctx.scene.add(obj);
+  return obj;
+}
+
+function lollipop(s) {
+  const g = new THREE.Group();
+  const [c1, c2] = CANDY[Math.floor(rand() * CANDY.length)];
+  const stickH = 1.6 * s, R = 0.6 * s, T = 0.18 * s;
+  const stick = mesh(new THREE.CylinderGeometry(0.05 * s, 0.05 * s, stickH, 24), std(0xfffaf0, { roughness: 0.4 }), 0, stickH / 2, 0, g);
+  const swirl = std(0xffffff, { map: swirlTex(c1, c2), roughness: 0.25 });
+  const rimMat = std(c1, { roughness: 0.25 });
+  const disc = mesh(new THREE.CylinderGeometry(R, R, T, 64), [rimMat, swirl, swirl], 0, stickH + R * 0.9, 0, g);
+  disc.rotation.x = Math.PI / 2;
+  mesh(new THREE.TorusGeometry(R, T / 2, 20, 96), rimMat, 0, stickH + R * 0.9, 0, g);
+  g.rotation.set((rand() - 0.5) * 0.15, rand() * Math.PI * 2, (rand() - 0.5) * 0.15);
+  if (s > 1.4) collide(stick);
+  return g;
+}
+
+function candyCane(s) {
+  const g = new THREE.Group();
+  const h = 2 * s, k = 0.8 * s;
+  const pts = [[0, 0], [0, h * 0.5], [0, h], [k * 0.15, h + k * 0.38], [k * 0.5, h + k * 0.52], [k * 0.85, h + k * 0.38], [k, h], [k, h - k * 0.3]]
+    .map(([x, y]) => V(x, y, 0));
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+  const mat = std(0xffffff, { map: stripeTex('#ffffff', '#ff2d4a', Math.round((curve.getLength() * 2.2) / s)), roughness: 0.3 });
+  const r = 0.13 * s;
+  const tube = mesh(new THREE.TubeGeometry(curve, 160, r, 24), mat, 0, 0, 0, g);
+  mesh(new THREE.SphereGeometry(r, 24, 12), std(0xffffff, { roughness: 0.3 }), pts[7].x, pts[7].y, 0, g);
+  g.rotation.y = rand() * Math.PI * 2;
+  g.rotation.z = (rand() - 0.5) * 0.12;
+  if (s > 0.9) collide(tube);
+  return g;
+}
+
+function gumdrop(s) {
+  const R = 0.5 * s, Hh = 0.75 * s;
+  const prof = [new THREE.Vector2(0, 0), new THREE.Vector2(R * 0.92, 0), new THREE.Vector2(R, 0.06 * R)];
+  for (let i = 1; i <= 24; i++) {
+    const a = (i / 24) * (Math.PI / 2);
+    prof.push(new THREE.Vector2(Math.max(0.0001, R * Math.cos(a) * (1 - 0.12 * Math.sin(a))), 0.06 * R + Hh * Math.sin(a)));
+  }
+  const col = [0xff4f8b, 0xffb02e, 0x7b6cff, 0x29c7b8, 0x8ee04a, 0xff5a3c][Math.floor(rand() * 6)];
+  const m = new THREE.Mesh(new THREE.LatheGeometry(prof, 64), std(col, { roughness: 0.75, emissive: col, emissiveIntensity: 0.12 }));
+  if (s > 1.6) collide(m);
+  return m;
+}
+
+function sweet(s) {
+  const g = new THREE.Group();
+  const [c1, c2] = CANDY[Math.floor(rand() * CANDY.length)];
+  const body = mesh(new THREE.SphereGeometry(0.35 * s, 40, 24), std(0xffffff, { roughness: 0.2, map: stripeTex(c1, c2, 3) }), 0, 0.3 * s, 0, g);
+  body.scale.set(1.3, 0.85, 0.85);
+  const prof = [];
+  for (let i = 0; i <= 12; i++) {
+    const t = i / 12;
+    prof.push(new THREE.Vector2(0.06 * s + 0.26 * s * t * t + 0.02 * s * Math.sin(t * 20), t * 0.35 * s));
+  }
+  const wrapMat = std(c2 === '#ffffff' ? c1 : c2, { roughness: 0.15, metalness: 0.2, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+  for (const sx of [-1, 1]) {
+    const w = mesh(new THREE.LatheGeometry(prof, 48), wrapMat, sx * 0.4 * s, 0.3 * s, 0, g);
+    w.rotation.z = (-sx * Math.PI) / 2;
+  }
+  g.rotation.y = rand() * Math.PI * 2;
+  return g;
+}
+
+function buildCandy() {
+  const kinds = [
+    [lollipop, 14, () => 0.8 + rand() * 1.6, 0.9],
+    [candyCane, 12, () => 0.7 + rand() * 1.1, 0.9],
+    [gumdrop, 22, () => 0.6 + rand() * 2.2, 1.1],
+    [sweet, 16, () => 0.8 + rand() * 1.2, 0.8],
+  ];
+  for (const [make, count, size, rad] of kinds) {
+    for (let i = 0; i < count; i++) {
+      const s = size();
+      const spot = freeSpot(9, 47, rad * s);
+      if (!spot) continue;
+      placeOnGround(make(s), spot[0], spot[1]);
+    }
   }
 }
 
-function buildWater() {
-  const c = zoneCenter('Water', 26);
-  const pondR = 10;
-  const shore = mesh(new THREE.RingGeometry(pondR, pondR + 1, 48), std(0xe9d9a6), c.x, 0.02, c.z);
-  shore.rotation.x = -Math.PI / 2;
-  const pondMat = std(0x2f8fe0, { transparent: true, opacity: 0.85, roughness: 0.15, metalness: 0.1, emissive: 0x0a3a6a, emissiveIntensity: 0.4 });
-  const pond = mesh(new THREE.CircleGeometry(pondR, 48), pondMat, c.x, 0.03, c.z);
-  pond.rotation.x = -Math.PI / 2;
-  every(() => { pondMat.emissiveIntensity = 0.35 + Math.sin(time * 1.2) * 0.1; });
-
-  // Expanding ripples.
-  const rippleGeo = new THREE.RingGeometry(0.9, 1, 40);
-  for (let i = 0; i < 6; i++) {
-    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false });
-    const r = mesh(rippleGeo, mat, 0, 0.05, 0);
-    r.rotation.x = -Math.PI / 2;
-    let t = i / 6;
-    const place = () => { const a = rand() * 6.28, d = rand() * 6; r.position.set(c.x + Math.cos(a) * d, 0.05, c.z + Math.sin(a) * d); };
-    place();
-    every((dt) => {
-      t += dt / 3.5;
-      if (t > 1) { t = 0; place(); }
-      r.scale.setScalar(0.3 + t * 3.5);
-      mat.opacity = 0.5 * (1 - t);
-    });
-  }
-
-  // Lily pads.
-  const padMat = std(0x3e9b4f, { side: THREE.DoubleSide });
-  const lotus = std(0xff9ad5, { emissive: 0xff9ad5, emissiveIntensity: 0.2 });
-  for (let i = 0; i < 12; i++) {
-    const a = rand() * 6.28, d = 2 + rand() * 6.5;
-    const pad = mesh(new THREE.CircleGeometry(0.5 + rand() * 0.4, 20, 0.3, Math.PI * 2 - 0.6), padMat, c.x + Math.cos(a) * d, 0.06, c.z + Math.sin(a) * d);
-    pad.rotation.set(-Math.PI / 2, 0, rand() * 6.28);
-    if (i % 3 === 0) mesh(new THREE.ConeGeometry(0.15, 0.25, 6), lotus, pad.position.x, 0.18, pad.position.z);
-  }
-
-  // Reeds around the shore.
-  const reedMat = std(0x6b8e3a);
-  const reedGeo = new THREE.CylinderGeometry(0.03, 0.03, 1, 4);
-  for (let i = 0; i < 40; i++) {
-    const a = rand() * 6.28, d = pondR + 0.3 + rand() * 0.8;
-    const h = 0.6 + rand() * 0.9;
-    const m = mesh(reedGeo, reedMat, c.x + Math.cos(a) * d, h / 2, c.z + Math.sin(a) * d);
-    m.scale.y = h;
-    m.rotation.z = (rand() - 0.5) * 0.3;
-  }
-
-  // Smooth pebbles and crystal spires around the rest of the zone.
-  const pebbleMat = std(0x9fb6c9);
-  const crystalMat = std(0x9fe6ff, { transparent: true, opacity: 0.8, emissive: 0x2a8fd0, emissiveIntensity: 0.4, flatShading: true });
+function buildTrees() {
+  // Cotton-candy trees with striped candy trunks, and round bushes.
+  const canopyCols = [0xffa6d6, 0xa8d8ff, 0xd3b4ff, 0xb5f5d0, 0xffd6a0];
+  const ball = new THREE.SphereGeometry(1, 40, 24);
   for (let i = 0; i < 14; i++) {
-    const p = randInZone('Water', 9, 54);
-    if (p.distanceTo(c) < pondR + 2) continue;
-    if (i % 2) {
-      const s = 0.4 + rand() * 0.9;
-      const m = mesh(new THREE.SphereGeometry(1, 12, 8), pebbleMat, p.x, s * 0.3, p.z);
-      m.scale.set(s * 1.3, s * 0.6, s);
-      if (s > 0.9) collide(m);
-    } else {
-      const h = 1.5 + rand() * 3;
-      const m = mesh(new THREE.OctahedronGeometry(1, 0), crystalMat, p.x, h * 0.45, p.z);
-      m.scale.set(0.5, h, 0.5);
-      m.rotation.y = rand() * 3;
-      collide(m);
+    const spot = freeSpot(12, 46, 2.4, 3);
+    if (!spot) continue;
+    const g = new THREE.Group();
+    const h = 3 + rand() * 2.5, bend = rand() * Math.PI * 2;
+    const pts = [0, 0.35, 0.7, 1].map((t) => V(Math.cos(bend) * 0.5 * t * t, t * h, Math.sin(bend) * 0.5 * t * t));
+    collide(mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 48, 0.22, 20),
+      std(0xffffff, { map: stripeTex('#fff6ea', '#ff8fb8', Math.round(h * 1.5)), roughness: 0.4 }), 0, 0, 0, g));
+    const col = canopyCols[i % canopyCols.length];
+    const cm = std(col, { roughness: 1, emissive: col, emissiveIntensity: 0.15 });
+    const top = pts[3];
+    for (let k = 0; k < 5; k++) {
+      const a = k * 1.3;
+      const b = mesh(ball, cm, top.x + Math.cos(a) * 0.9, top.y + 0.4 + (k % 2) * 0.6, top.z + Math.sin(a) * 0.9, g);
+      b.scale.setScalar(1.1 + rand() * 0.5);
     }
+    placeOnGround(g, spot[0], spot[1], 0.1);
   }
-
-  // Bubbles rising from the pond.
-  const bubbles = new Particles({ count: 80, color: 0xe8f8ff, size: 0.1, gravity: -0.4 });
-  let acc = 0;
-  every((dt) => {
-    acc += dt * 10;
-    while (acc > 1) {
-      acc--;
-      const a = rand() * 6.28, d = rand() * 8;
-      bubbles.emit(V(c.x + Math.cos(a) * d, 0.05, c.z + Math.sin(a) * d), V(0, 0.3 + rand() * 0.4, 0), 2 + rand());
+  const bushMat = [0x4fd35a, 0x7fe35a].map((c) => std(c, { roughness: 0.9 }));
+  for (let i = 0; i < 26; i++) {
+    const spot = freeSpot(9, 47, 1, 1.2);
+    if (!spot) continue;
+    const g = new THREE.Group();
+    for (let k = 0; k < 3; k++) {
+      const b = mesh(ball, bushMat[(i + k) % 2], (k - 1) * 0.55, 0.35, (rand() - 0.5) * 0.4, g);
+      b.scale.set(0.6 + rand() * 0.2, 0.5 + rand() * 0.2, 0.6);
     }
-  });
+    g.rotation.y = rand() * 6.28;
+    placeOnGround(g, spot[0], spot[1], 0.05);
+  }
 }
 
 // ---------- the Fire Hydrant ----------
@@ -564,26 +660,25 @@ function buildHydrant() {
   group.add(body);
   ctx.scene.add(group);
 
-  // Desaturated, semi-transparent: he's fading because children forgot him.
-  const red = std(0xc9645c, { transparent: true, emissive: 0x2a0a08, roughness: 0.6 });
-  const metal = std(0xb7aaa6, { transparent: true, metalness: 0.3, roughness: 0.5 });
-  const eye = new THREE.MeshBasicMaterial({ color: 0x1a1a1a, transparent: true });
-  const shine = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true });
-  red.userData.k = 1; metal.userData.k = 1; eye.userData.k = 1.5; shine.userData.k = 1.5;
+  // True colours here; the fade system washes them out according to how remembered he is.
+  const red = std(0xe8262b, { emissive: 0x3a0505, roughness: 0.45 });
+  const metal = std(0xd8c8b8, { metalness: 0.3, roughness: 0.4 });
+  const eye = new THREE.MeshBasicMaterial({ color: 0x1a1a1a });
+  const shine = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  red.userData.k = 1.6; metal.userData.k = 1.4; eye.userData.k = 2; shine.userData.k = 2;
 
-  mesh(new THREE.CylinderGeometry(0.34, 0.36, 0.12, 20), metal, 0, 0.06, 0, body);
-  mesh(new THREE.CylinderGeometry(0.24, 0.26, 0.64, 20), red, 0, 0.44, 0, body);
-  mesh(new THREE.CylinderGeometry(0.29, 0.29, 0.08, 20), metal, 0, 0.78, 0, body);
-  mesh(new THREE.SphereGeometry(0.245, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), red, 0, 0.8, 0, body);
-  mesh(new THREE.CylinderGeometry(0.07, 0.09, 0.1, 6), metal, 0, 1.08, 0, body);
+  mesh(new THREE.CylinderGeometry(0.34, 0.36, 0.12, 48), metal, 0, 0.06, 0, body);
+  mesh(new THREE.CylinderGeometry(0.24, 0.26, 0.64, 48), red, 0, 0.44, 0, body);
+  mesh(new THREE.TorusGeometry(0.27, 0.035, 12, 48), metal, 0, 0.78, 0, body).rotation.x = Math.PI / 2;
+  mesh(new THREE.SphereGeometry(0.245, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2), red, 0, 0.78, 0, body);
+  mesh(new THREE.CylinderGeometry(0.07, 0.09, 0.1, 6), metal, 0, 1.06, 0, body);
   for (const s of [-1, 1]) {
-    const n = mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.16, 12), metal, s * 0.3, 0.52, 0, body);
+    const n = mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.16, 32), metal, s * 0.3, 0.52, 0, body);
     n.rotation.z = Math.PI / 2;
-    // Eyes on the front (+z).
-    mesh(new THREE.SphereGeometry(0.048, 10, 8), eye, s * 0.085, 0.66, 0.225, body);
-    mesh(new THREE.SphereGeometry(0.016, 6, 4), shine, s * 0.085 + 0.015, 0.68, 0.268, body);
+    mesh(new THREE.SphereGeometry(0.048, 24, 16), eye, s * 0.085, 0.66, 0.225, body);
+    mesh(new THREE.SphereGeometry(0.016, 12, 8), shine, s * 0.085 + 0.015, 0.68, 0.268, body);
   }
-  const mouth = mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.12, 14), metal, 0, 0.47, 0.27, body);
+  const mouth = mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.12, 32), metal, 0, 0.47, 0.27, body);
   mouth.rotation.x = Math.PI / 2;
 
   const nozzle = new THREE.Object3D(); // spray comes out of the right-side nozzle (+x)
@@ -595,9 +690,8 @@ function buildHydrant() {
 
   return {
     group, body, nozzle, wisps, spray,
-    mats: [red, metal, eye, shine],
+    fade: makeFadable(group, REMEMBERED.hydrant),
     mode: 'manual',       // 'manual' | 'stay' (turn to face player) | 'follow'
-    opacity: HYDRANT_OPACITY,
     puff: 1, hop: 0, hopY: 0, jumpY: 0, wispT: 0,
     interactable: false,
   };
@@ -611,8 +705,9 @@ function updateHydrant(dt) {
 
   if (h.mode === 'follow') {
     if (d > 30) {
-      // Lost him (e.g. after a gust) — he waddles back in from behind the player.
+      // Lost him (e.g. after a gust) — he pops back in from behind the player.
       g.position.set(p.x + Math.sin(player.yaw) * 2.5, 0, p.z + Math.cos(player.yaw) * 2.5);
+      g.position.y = H(g.position.x, g.position.z);
     } else if (d > FOLLOW_DIST + 0.4) {
       const speed = Math.min(8, 2.5 + (d - FOLLOW_DIST) * 2);
       const step = Math.min(speed * dt, d - FOLLOW_DIST);
@@ -620,6 +715,7 @@ function updateHydrant(dt) {
       g.position.z += (dz / d) * step;
       moving = true;
     }
+    g.position.y += (H(g.position.x, g.position.z) - g.position.y) * Math.min(1, dt * 15);
   }
   if (h.mode !== 'manual' && d > 0.01) {
     g.rotation.y = lerpAngle(g.rotation.y, Math.atan2(dx, dz), 1 - Math.exp(-dt * 8));
@@ -634,22 +730,16 @@ function updateHydrant(dt) {
   const sq = talking ? Math.sin(time * 28) * 0.05 : 0;
   h.body.scale.set(h.puff * (1 - sq * 0.5), h.puff * (1 + sq), h.puff * (1 - sq * 0.5));
 
-  // Faded shimmer, with the odd flicker — like he's barely holding on.
-  const flicker = Math.random() < 0.015 ? 0.4 : 1;
-  const o = h.opacity * (0.85 + 0.15 * Math.sin(time * 2.3)) * flicker;
-  for (const m of h.mats) m.opacity = Math.min(1, o * m.userData.k);
-
-  // Wisps drifting off him.
-  h.wispT -= dt;
+  // Wisps drift off him — the more forgotten, the faster he comes apart.
+  h.wispT -= dt * (1 - h.fade.remembered) * 1.25;
   if (h.wispT <= 0) {
     h.wispT = 0.12;
     const a = Math.random() * 6.28;
-    h.wisps.emit(V(g.position.x + Math.cos(a) * 0.25, h.body.position.y + 0.2 + Math.random() * 0.8, g.position.z + Math.sin(a) * 0.25),
+    h.wisps.emit(V(g.position.x + Math.cos(a) * 0.25, g.position.y + h.body.position.y + 0.2 + Math.random() * 0.8, g.position.z + Math.sin(a) * 0.25),
       V(Math.cos(a) * 0.1, 0.3, Math.sin(a) * 0.1), 1.6);
   }
 
-  // He only shows his ability by the water.
-  const want = state === 'free' && !busy && zone === 'Water';
+  const want = state === 'free' && !busy;
   if (want !== h.interactable) {
     h.interactable = want;
     if (want) ctx.interact.add(g, hydrantAbility, { distance: 4 });
@@ -662,21 +752,24 @@ async function intro(g) {
   const { player, camera, dialogue, audio } = ctx;
   player.enabled = false;
   hydrant.mode = 'manual';
-  hydrant.group.position.set(0, 0, 1.5);
-  hydrant.group.rotation.y = Math.PI; // looking away at first
+  const gy = H(0, 0);
+  hydrant.group.position.set(0, gy, 0);
+  hydrant.group.rotation.y = 0; // facing the player
 
-  const eye = V(0, 1.6, 5);
-  const look = V(0, 0.75, 1.5);
-  const from = V(-6, 16, 22);
-  const lookFrom = V(0, 2, -20);
+  const eye = V(0, H(0, 2.6) + 1.6, 2.6);
+  const look = V(0, gy + 0.75, 0);
+  const face = V(0, gy + 0.64, 0.24);
+  const from = V(0, gy + 0.66, 0.5);  // the globe's zoom ends right up against his face
   const tmpLook = V(0, 0, 0);
 
-  // Swoop down out of the sky into Quirkland.
-  [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => alive(g) && audio.tone(f, 0.6, { volume: 0.08 }), i * 180));
-  await tween(3.2, (k) => {
-    const e = ease(k);
+  // Pull back from his face to where the player is standing.
+  camera.position.copy(from);
+  camera.lookAt(face);
+  [784, 659, 523].forEach((f, i) => setTimeout(() => alive(g) && audio.tone(f, 0.5, { volume: 0.07 }), i * 140));
+  await tween(2.4, (k) => {
+    const e = easeOut(k);
     camera.position.lerpVectors(from, eye, e);
-    tmpLook.lerpVectors(lookFrom, look, ease(Math.min(1, k * 1.3)));
+    tmpLook.lerpVectors(face, look, e);
     camera.lookAt(tmpLook);
   });
   if (!alive(g)) return;
@@ -686,22 +779,18 @@ async function intro(g) {
     await wait(0.2);
     if (!alive(g)) return;
   }
-  await wait(0.4);
+  await wait(0.3);
   if (!alive(g)) return;
 
   const lines = INTRO.map((text) => ({ speaker: HYDRANT, color: HYDRANT_COLOR, text }));
   lines[0].onStart = () => {
-    // Startled: hop and spin round to face the visitor.
+    // Startled little hop.
     audio.tone(880, 0.15, { type: 'triangle', volume: 0.1 });
-    const r0 = hydrant.group.rotation.y;
-    tween(0.5, (k) => {
-      hydrant.group.rotation.y = r0 * (1 - ease(k));
-      hydrant.jumpY = Math.sin(k * Math.PI) * 0.35;
-    }).then(() => { if (alive(g)) hydrant.mode = 'stay'; });
+    tween(0.5, (k) => { hydrant.jumpY = Math.sin(k * Math.PI) * 0.35; }).then(() => { if (alive(g)) hydrant.mode = 'stay'; });
   };
   lines[4].onStart = () => {
     // "See how faded I am?" — he flickers almost out.
-    tween(2.2, (k) => { hydrant.opacity = HYDRANT_OPACITY * (1 - 0.65 * Math.sin(k * Math.PI)); });
+    tween(2.2, (k) => { hydrant.fade.dip = 1 - 0.65 * Math.sin(k * Math.PI); });
   };
   lines[7].onStart = () => {
     tween(0.4, (k) => { hydrant.jumpY = Math.sin(k * Math.PI) * 0.25; });
@@ -717,7 +806,7 @@ async function intro(g) {
   state = 'free';
 }
 
-// ---------- abilities ----------
+// ---------- the hydrant's ability ----------
 async function hydrantAbility() {
   if (busy || state !== 'free') return;
   busy = true;
@@ -754,7 +843,6 @@ async function hydrantAbility() {
     hydrant.body.position.x = (Math.random() - 0.5) * 0.03; // straining
   });
   if (!alive(g)) return;
-  // Last few drips.
   for (let i = 0; i < 4; i++) hydrant.spray.emit(origin, V(dir.x * 0.4, 0.2, dir.z * 0.4), 0.5, 0.08);
   hydrant.body.position.x = 0;
   await tween(0.6, (k) => { hydrant.puff = 1.15 - 0.15 * ease(k); });
@@ -789,180 +877,15 @@ function faceToward(obj, p, sec) {
   return tween(sec, (k) => { obj.rotation.y = lerpAngle(r0, r1, ease(k)); });
 }
 
-// --- Ember the dragon (Fire) ---
-function buildEmber() {
-  const at = zoneCenter('Fire', 27);
-  const g = new THREE.Group();
-  g.position.copy(at);
-  g.rotation.y = Math.atan2(-at.x, -at.z); // face the plaza
-  ctx.scene.add(g);
-
-  const scale = std(0xff4a1c, { emissive: 0xff3300, emissiveIntensity: 0.35, roughness: 0.5 });
-  const belly = std(0xffc24d, { emissive: 0xffa000, emissiveIntensity: 0.3 });
-  const wingMat = std(0xff2d6a, { emissive: 0xff1040, emissiveIntensity: 0.3, side: THREE.DoubleSide });
-  const horn = std(0xfff1c1);
-  const white = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const black = new THREE.MeshBasicMaterial({ color: 0x111111 });
-  const ball = new THREE.SphereGeometry(1, 20, 14);
-
-  const body = mesh(ball, scale, 0, 1.4, 0, g);
-  body.scale.set(1.1, 0.95, 1.5);
-  collide(body);
-  mesh(ball, belly, 0, 1.25, 0.5, g).scale.set(0.85, 0.75, 1.05);
-  for (const [x, z] of [[-0.6, 0.7], [0.6, 0.7], [-0.6, -0.7], [0.6, -0.7]]) {
-    mesh(new THREE.CylinderGeometry(0.22, 0.26, 0.9, 10), scale, x, 0.45, z, g);
-  }
-
-  const neck = new THREE.Group();
-  neck.position.set(0, 1.9, 1.0);
-  g.add(neck);
-  mesh(new THREE.CylinderGeometry(0.32, 0.45, 1.4, 12), scale, 0, 0.6, 0.25, neck).rotation.x = 0.4;
-  const head = new THREE.Group();
-  head.position.set(0, 1.35, 0.55);
-  neck.add(head);
-  mesh(ball, scale, 0, 0, 0, head).scale.set(0.55, 0.48, 0.62);
-  mesh(ball, scale, 0, -0.1, 0.55, head).scale.set(0.4, 0.3, 0.45);
-  for (const sx of [-1, 1]) {
-    mesh(new THREE.SphereGeometry(0.15, 12, 8), white, sx * 0.26, 0.15, 0.38, head);
-    mesh(new THREE.SphereGeometry(0.075, 8, 6), black, sx * 0.29, 0.16, 0.5, head);
-    mesh(new THREE.ConeGeometry(0.09, 0.45, 8), horn, sx * 0.22, 0.48, -0.2, head).rotation.x = -0.5;
-    mesh(new THREE.SphereGeometry(0.04, 6, 4), black, sx * 0.12, -0.02, 0.98, head);
-  }
-  const mouth = new THREE.Object3D();
-  mouth.position.set(0, -0.15, 1.0);
-  head.add(mouth);
-
-  const wingShape = new THREE.Shape([
-    new THREE.Vector2(0, 0), new THREE.Vector2(2.3, 0.9), new THREE.Vector2(2.7, -0.2),
-    new THREE.Vector2(1.9, -0.5), new THREE.Vector2(1.2, -0.9), new THREE.Vector2(0.5, -0.6),
-  ]);
-  const wingGeo = new THREE.ShapeGeometry(wingShape).rotateX(-Math.PI / 2);
-  const wings = [-1, 1].map((sx) => {
-    const pivot = new THREE.Group();
-    pivot.position.set(sx * 0.6, 2.1, -0.1);
-    pivot.scale.x = sx;
-    g.add(pivot);
-    mesh(wingGeo, wingMat, 0, 0, 0, pivot);
-    return pivot;
-  });
-
-  const tail = [];
-  for (let i = 0; i < 8; i++) {
-    const r = 0.42 * (1 - i / 9);
-    tail.push(mesh(new THREE.SphereGeometry(r, 12, 8), scale, 0, 1.15 - i * 0.12, -1.4 - i * 0.42, g));
-  }
-  const tip = mesh(new THREE.ConeGeometry(0.18, 0.4, 4), wingMat, 0, 0.2, -4.9, g);
-  tip.rotation.x = -Math.PI / 2;
-  tail.push(tip);
-
-  // Unlit torches in a ring around her.
-  const wood = std(0x4a2e1e), iron = std(0x333333), coal = std(0x1c1c1c);
-  const torches = [];
-  for (let i = 0; i < 7; i++) {
-    const a = (i / 7) * Math.PI * 2 + 0.2;
-    const tx = at.x + Math.cos(a) * 6, tz = at.z + Math.sin(a) * 6;
-    collide(mesh(new THREE.CylinderGeometry(0.08, 0.11, 1.7, 8), wood, tx, 0.85, tz));
-    mesh(new THREE.CylinderGeometry(0.26, 0.14, 0.25, 12), iron, tx, 1.8, tz);
-    const char = mesh(new THREE.SphereGeometry(0.2, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), coal, tx, 1.88, tz);
-    const flame = new THREE.Group();
-    flame.position.set(tx, 1.9, tz);
-    flame.visible = false;
-    ctx.scene.add(flame);
-    mesh(new THREE.ConeGeometry(0.24, 0.7, 10), new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.9 }), 0, 0.35, 0, flame);
-    mesh(new THREE.ConeGeometry(0.12, 0.4, 8), new THREE.MeshBasicMaterial({ color: 0xffe680 }), 0, 0.22, 0, flame);
-    const light = new THREE.PointLight(0xff8a3a, 0, 10, 1.5);
-    light.position.set(tx, 2.4, tz);
-    ctx.scene.add(light);
-    torches.push({ x: tx, z: tz, char, flame, light, lit: false, ph: rand() * 6 });
-  }
-
-  const fire = new Particles({ count: 600, color: 0xffd04a, color2: 0xff3000, size: 0.3, grow: 2.2, gravity: -1.5, drag: 0.6 });
-
-  const ember = {
-    name: 'Ember', color: '#ff8a3d', group: g,
-    line: 'A human! Do they still tell stories about dragons out there? They must — look how bright I am!',
-    reaction: 'Show-off.',
-    ability: (gg) => emberBreath(ember, gg),
-    neck, mouth, torches, fire,
-  };
-
-  every(() => {
-    const b = 1 + Math.sin(time * 2) * 0.03;
-    body.scale.set(1.1 * b, 0.95 * b, 1.5);
-    wings[0].rotation.z = -(0.25 + Math.sin(time * 2.4) * 0.3);
-    wings[1].rotation.z = -(0.25 + Math.sin(time * 2.4) * 0.3);
-    tail.forEach((m, i) => { m.position.x = Math.sin(time * 2 - i * 0.6) * i * 0.06; });
-    for (const t of torches) {
-      if (!t.lit) continue;
-      const f = 1 + Math.sin(time * 14 + t.ph) * 0.12 + Math.sin(time * 23 + t.ph) * 0.06;
-      t.flame.scale.set(1, f, 1);
-      t.light.intensity = 9 * f;
-    }
-  });
-
-  ctx.interact.add(g, () => meet(ember), { distance: 7 });
-  return ember;
-}
-
-async function emberBreath(e, g) {
-  const { audio } = ctx;
-  const g0 = e.group;
-  const mouthPos = V(0, 0, 0), aim = V(0, 0, 0);
-
-  // Rear back...
-  await tween(0.5, (k) => { e.neck.rotation.x = -0.45 * ease(k); });
-  if (!alive(g)) return;
-  audio.noise(1.6, { volume: 0.3 });
-  audio.tone(70, 1.4, { type: 'sawtooth', volume: 0.12 });
-
-  // ...then a full sweep of fire, lighting every torch the plume reaches.
-  const r0 = g0.rotation.y;
-  let acc = 0;
-  await tween(3.4, (k, dt) => {
-    e.neck.rotation.x = -0.45 + 0.75 * Math.min(1, k * 6);
-    g0.rotation.y = r0 + ease(k) * Math.PI * 2;
-    e.mouth.getWorldPosition(mouthPos);
-    const fx = Math.sin(g0.rotation.y), fz = Math.cos(g0.rotation.y);
-    aim.set(g0.position.x + fx * 6, 2.0, g0.position.z + fz * 6).sub(mouthPos).normalize();
-    acc += dt * 170;
-    while (acc > 1) {
-      acc--;
-      const sp = 9 + Math.random() * 3;
-      e.fire.emit(mouthPos, V(aim.x * sp + (Math.random() - 0.5) * 1.6, aim.y * sp + (Math.random() - 0.5) * 1.6, aim.z * sp + (Math.random() - 0.5) * 1.6),
-        0.55 + Math.random() * 0.3, 0.25 + Math.random() * 0.2);
-    }
-    for (const t of e.torches) {
-      if (t.lit) continue;
-      const bearing = Math.atan2(t.x - g0.position.x, t.z - g0.position.z);
-      if (Math.abs(lerpAngle(0, bearing - g0.rotation.y, 1)) < 0.2) lightTorch(t, g);
-    }
-  });
-  if (!alive(g)) return;
-  await tween(0.4, (k) => { e.neck.rotation.x = 0.3 * (1 - ease(k)); });
-  if (!alive(g)) return;
-  await faceToward(g0, ctx.player.position, 0.4);
-}
-
-function lightTorch(t, g) {
-  t.lit = true;
-  setTimeout(() => {
-    if (!alive(g)) return;
-    t.char.visible = false;
-    t.flame.visible = true;
-    ctx.audio.noise(0.25, { volume: 0.15 });
-    ctx.audio.tone(320, 0.2, { type: 'triangle', volume: 0.06 });
-    tween(0.3, (k) => { t.flame.scale.setScalar(Math.max(0.01, easeOutBack(k))); });
-  }, 380);
-}
-
-// --- Skye the kite (Air) ---
+// --- Skye the kite (air) — flies above the hill north-east of the meadow ---
 function buildSkye() {
-  const at = zoneCenter('Air', 27);
+  const [ax, az] = HILLS[0];
   const g = new THREE.Group();
-  g.position.copy(at);
-  g.rotation.y = Math.atan2(-at.x, -at.z);
+  g.position.set(ax, H(ax, az), az);
+  g.rotation.y = Math.atan2(-ax, -az);
   ctx.scene.add(g);
-  mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.6, 6), std(0x8a6a4a), 0, 0.3, 0, g);
+  props.push([ax, az, 2.5]);
+  mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.6, 16), std(0x8a6a4a), 0, 0.3, 0, g);
 
   const kite = new THREE.Group();
   kite.position.set(0, 3.6, 0.6);
@@ -974,14 +897,14 @@ function buildSkye() {
     mesh(new THREE.ShapeGeometry(shape), std(cols[i], { side: THREE.DoubleSide, emissive: cols[i], emissiveIntensity: 0.35 }), 0, 0, 0, kite);
   }
   const spar = std(0xfff6e0);
-  mesh(new THREE.BoxGeometry(0.04, 2.7, 0.04), spar, 0, -0.15, -0.03, kite);
-  mesh(new THREE.BoxGeometry(1.7, 0.04, 0.04), spar, 0, 0, -0.03, kite);
+  mesh(new THREE.CylinderGeometry(0.025, 0.025, 2.7, 12), spar, 0, -0.15, -0.03, kite);
+  mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.7, 12), spar, 0, 0, -0.03, kite).rotation.z = Math.PI / 2;
   const white = new THREE.MeshBasicMaterial({ color: 0xffffff }), black = new THREE.MeshBasicMaterial({ color: 0x111111 });
   for (const sx of [-1, 1]) {
-    mesh(new THREE.SphereGeometry(0.13, 12, 8), white, sx * 0.24, 0.3, 0.03, kite).scale.z = 0.4;
-    mesh(new THREE.SphereGeometry(0.065, 8, 6), black, sx * 0.24, 0.29, 0.08, kite).scale.z = 0.4;
+    mesh(new THREE.SphereGeometry(0.13, 24, 16), white, sx * 0.24, 0.3, 0.03, kite).scale.z = 0.4;
+    mesh(new THREE.SphereGeometry(0.065, 16, 12), black, sx * 0.24, 0.29, 0.08, kite).scale.z = 0.4;
   }
-  const smile = mesh(new THREE.TorusGeometry(0.2, 0.03, 6, 16, Math.PI), black, 0, 0, 0.04, kite);
+  const smile = mesh(new THREE.TorusGeometry(0.2, 0.03, 12, 32, Math.PI), black, 0, 0, 0.04, kite);
   smile.rotation.z = Math.PI;
 
   // Tail with bows, and the string down to the stake.
@@ -1011,6 +934,7 @@ function buildSkye() {
     ability: (gg) => skyeGust(skye, gg),
     kite, wind, loop: 0,
   };
+  skye.fade = makeFadable(g, REMEMBERED.kite);
 
   every(() => {
     kite.position.y = 3.6 + Math.sin(time * 1.3) * 0.3;
@@ -1065,203 +989,6 @@ async function skyeGust(s, g) {
   s.loop = 0;
 }
 
-// --- Sprout the beanstalk (Nature) ---
-function buildSprout() {
-  const at = zoneCenter('Nature', 27);
-  const g = new THREE.Group();
-  g.position.copy(at);
-  g.rotation.y = Math.atan2(-at.x, -at.z);
-  ctx.scene.add(g);
-  const sway = new THREE.Group();
-  g.add(sway);
-
-  const stalkMat = std(0x46c23a, { emissive: 0x1d6b12, emissiveIntensity: 0.4 });
-  const vineMat = std(0x8be04e, { emissive: 0x2f7a12, emissiveIntensity: 0.35 });
-  const leafMat = std(0x6ad84a, { emissive: 0x2a8a1a, emissiveIntensity: 0.3, flatShading: true });
-  const H = 14;
-  const pts = [], vine = [];
-  for (let i = 0; i <= 16; i++) {
-    const y = (i / 16) * H, a = i * 0.75, r = 0.6 * (1 - i / 22);
-    pts.push(V(Math.sin(a) * r, y, Math.cos(a) * r));
-    vine.push(V(Math.sin(a + 2.4) * (r + 0.35), y, Math.cos(a + 2.4) * (r + 0.35)));
-  }
-  const curve = new THREE.CatmullRomCurve3(pts);
-  mesh(new THREE.TubeGeometry(curve, 160, 0.4, 12), stalkMat, 0, 0, 0, sway);
-  mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vine), 160, 0.12, 8), vineMat, 0, 0, 0, sway);
-
-  const leafGeo = new THREE.SphereGeometry(1, 10, 6);
-  for (let i = 1; i < 15; i++) {
-    const p = curve.getPoint(i / 15);
-    const a = i * 2.1;
-    const leaf = mesh(leafGeo, leafMat, p.x + Math.cos(a) * 0.9, p.y, p.z + Math.sin(a) * 0.9, sway);
-    leaf.scale.set(0.9, 0.07, 0.45);
-    leaf.rotation.set(0, -a, 0.35);
-  }
-  // Bean pods.
-  const podMat = std(0x9be35a, { emissive: 0x3a7a10, emissiveIntensity: 0.3 });
-  for (let i = 0; i < 4; i++) {
-    const p = curve.getPoint(0.3 + i * 0.15);
-    const a = i * 1.7 + 1;
-    const pod = mesh(leafGeo, podMat, p.x + Math.cos(a) * 0.7, p.y - 0.4, p.z + Math.sin(a) * 0.7, sway);
-    pod.scale.set(0.16, 0.5, 0.16);
-  }
-  // A cloud at the top — it reaches the sky.
-  const cloudMat = std(0xffffff, { emissive: 0xdfe8ff, emissiveIntensity: 0.3 });
-  for (let i = 0; i < 6; i++) {
-    mesh(leafGeo, cloudMat, Math.cos(i) * 1.6, H + 0.3 + Math.sin(i * 2) * 0.3, Math.sin(i) * 1.6, sway).scale.setScalar(1.1 + (i % 3) * 0.3);
-  }
-
-  // Friendly face low on the stalk.
-  const fp = curve.getPoint(1.7 / H);
-  const white = new THREE.MeshBasicMaterial({ color: 0xffffff }), black = new THREE.MeshBasicMaterial({ color: 0x111111 });
-  const face = new THREE.Group();
-  face.position.set(fp.x, fp.y, fp.z + 0.38);
-  sway.add(face);
-  for (const sx of [-1, 1]) {
-    mesh(new THREE.SphereGeometry(0.12, 10, 8), white, sx * 0.15, 0.12, 0, face);
-    mesh(new THREE.SphereGeometry(0.06, 8, 6), black, sx * 0.15, 0.12, 0.09, face);
-  }
-  const smile = mesh(new THREE.TorusGeometry(0.14, 0.025, 6, 14, Math.PI), black, 0, -0.06, 0.04, face);
-  smile.rotation.z = Math.PI;
-
-  const blocker = mesh(new THREE.CylinderGeometry(1.1, 1.1, 4, 12), new THREE.MeshBasicMaterial(), 0, 2, 0, g);
-  blocker.visible = false;
-  collide(blocker);
-
-  every(() => {
-    sway.rotation.z = Math.sin(time * 0.8) * 0.025;
-    sway.rotation.x = Math.sin(time * 0.6) * 0.02;
-  });
-
-  const leaves = new Particles({ count: 300, color: 0x9dff6a, color2: 0xffe14d, size: 0.16, gravity: 5, drag: 0.8 });
-  const sprout = {
-    name: 'Sprout', color: '#6fe36a', group: g,
-    line: 'Plant one little bean in a story and look what happens!',
-    reaction: 'They still read that one at bedtime, you know.',
-    ability: (gg) => sproutGrow(sprout, gg),
-    leaves, grown: [],
-  };
-  ctx.interact.add(blocker, () => meet(sprout), { distance: 6 });
-  ctx.interact.add(sway, () => meet(sprout), { distance: 6 });
-  return sprout;
-}
-
-const TREE_TRUNKS = [0xb06cff, 0x2fd0c0, 0xff8fc8, 0xffb347];
-const TREE_TOPS = [0xff4fd8, 0x3ff2e6, 0xffc23f, 0x9cff3f, 0x7a7bff];
-const FRUIT = [0xffffff, 0xfff27a, 0xff7ad9, 0x7affff];
-
-function exoticTree(h) {
-  const tree = new THREE.Group();
-  const bend = rand() * 6.28, lean = 0.5 + rand() * 0.8;
-  const pts = [];
-  for (let i = 0; i <= 5; i++) {
-    const t = i / 5;
-    pts.push(V(Math.cos(bend + t * 2) * lean * t * t, t * h, Math.sin(bend + t * 2) * lean * t * t));
-  }
-  const curve = new THREE.CatmullRomCurve3(pts);
-  const trunkCol = TREE_TRUNKS[Math.floor(rand() * TREE_TRUNKS.length)];
-  const trunk = mesh(new THREE.TubeGeometry(curve, 24, 0.28, 8), std(trunkCol, { emissive: trunkCol, emissiveIntensity: 0.2 }), 0, 0, 0, tree);
-  const top = pts[pts.length - 1];
-  const col = TREE_TOPS[Math.floor(rand() * TREE_TOPS.length)];
-  const leafMat = std(col, { emissive: col, emissiveIntensity: 0.35, flatShading: true });
-  const type = Math.floor(rand() * 4);
-  if (type === 0) {          // umbrella with drooping fringe
-    mesh(new THREE.SphereGeometry(1, 16, 8), leafMat, top.x, top.y, top.z, tree).scale.set(2.6, 0.6, 2.6);
-    for (let i = 0; i < 10; i++) {
-      const a = (i / 10) * 6.28;
-      mesh(new THREE.SphereGeometry(0.3, 8, 6), leafMat, top.x + Math.cos(a) * 2.3, top.y - 0.6, top.z + Math.sin(a) * 2.3, tree).scale.y = 2;
-    }
-  } else if (type === 1) {   // stacked spiral cones
-    for (let i = 0; i < 4; i++) {
-      const c = mesh(new THREE.ConeGeometry(2 - i * 0.4, 1.6, 7), leafMat, top.x, top.y - 0.6 + i * 1.0, top.z, tree);
-      c.rotation.y = i * 0.5;
-    }
-  } else if (type === 2) {   // cluster of balls
-    for (let i = 0; i < 6; i++) {
-      const a = i * 1.1;
-      mesh(new THREE.IcosahedronGeometry(1 + rand() * 0.5, 1), leafMat,
-        top.x + Math.cos(a) * 1.1, top.y + (i % 2) * 0.8, top.z + Math.sin(a) * 1.1, tree);
-    }
-  } else {                   // palm-like blades
-    for (let i = 0; i < 7; i++) {
-      const a = (i / 7) * 6.28;
-      const b = mesh(new THREE.SphereGeometry(1, 10, 6), leafMat, top.x + Math.cos(a) * 1.4, top.y - 0.2, top.z + Math.sin(a) * 1.4, tree);
-      b.scale.set(1.8, 0.12, 0.45);
-      b.rotation.set(0, -a, -0.35);
-    }
-  }
-  for (let i = 0; i < 5; i++) {   // glowing fruit
-    const a = rand() * 6.28;
-    const fc = FRUIT[Math.floor(rand() * FRUIT.length)];
-    mesh(new THREE.SphereGeometry(0.18, 8, 6), new THREE.MeshBasicMaterial({ color: fc }),
-      top.x + Math.cos(a) * (0.8 + rand()), top.y - 0.5 - rand() * 0.5, top.z + Math.sin(a) * (0.8 + rand()), tree);
-  }
-  return { tree, trunk };
-}
-
-function removeTree(t) {
-  ctx.scene.remove(t.tree);
-  ctx.player.colliders = ctx.player.colliders.filter((c) => c !== t.trunk);
-  t.tree.traverse((o) => { o.geometry?.dispose(); o.material?.dispose(); });
-}
-
-async function sproutGrow(s, g) {
-  const { player, audio } = ctx;
-  for (const t of s.grown) removeTree(t);
-  s.grown = [];
-
-  // Giant exotic trees burst out of the ground in a ring around the player.
-  const c = player.position.clone();
-  const sproutAt = s.group.position;
-  const N = 9;
-  for (let i = 0; i < N; i++) {
-    const a = (i / N) * Math.PI * 2 + rand() * 0.3;
-    const r = 5.5 + rand() * 2.5;
-    const x = c.x + Math.cos(a) * r, z = c.z + Math.sin(a) * r;
-    if (Math.hypot(x - sproutAt.x, z - sproutAt.z) < 3) continue;
-    const t = exoticTree(6 + rand() * 4);
-    t.tree.position.set(x, 0, z);
-    t.tree.scale.setScalar(0.001);
-    t.spin = rand() * 6.28;
-    t.delay = s.grown.length * 0.14;
-    ctx.scene.add(t.tree);
-    s.grown.push(t);
-  }
-  audio.tone(55, 2.2, { type: 'sine', volume: 0.25 });
-  const GROW = 1.1;
-  let tt = 0;
-  await tween(GROW + s.grown.length * 0.14, (k, dt) => {
-    tt += dt;
-    for (const t of s.grown) {
-      const local = (tt - t.delay) / GROW;
-      if (local <= 0) continue;
-      if (!t.popped) {
-        t.popped = true;
-        audio.tone(200 + Math.random() * 300, 0.25, { type: 'triangle', volume: 0.08 });
-        for (let j = 0; j < 30; j++) {
-          const a = Math.random() * 6.28;
-          s.leaves.emit(V(t.tree.position.x, 0.2, t.tree.position.z), V(Math.cos(a) * 3, 4 + Math.random() * 4, Math.sin(a) * 3), 1.2);
-        }
-      }
-      const e = Math.max(0.001, easeOutBack(Math.min(1, local)));
-      t.tree.scale.set(e, e, e);
-      t.tree.rotation.y = t.spin + (1 - Math.min(1, local)) * 1.5;
-    }
-  });
-  if (!alive(g)) return;
-  for (const t of s.grown) collide(t.trunk);
-}
-
-// ---------- zone title ----------
-function showZone(name) {
-  if (!toastEl) return;
-  toastEl.textContent = name.toUpperCase();
-  toastEl.style.color = ZONES[name].accent;
-  toastEl.style.opacity = '1';
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { if (toastEl) toastEl.style.opacity = '0'; }, 2200);
-}
-
 // ---------- scene ----------
 export default {
   name: NAME,
@@ -1269,25 +996,25 @@ export default {
   init(c) {
     ctx = c;
     gen++;
-    tasks = []; systems = []; time = 0; state = 'intro'; busy = false; zone = null;
+    tasks = []; systems = []; fadables = []; pathPts = []; pathEnds = []; props = [[0, 0, 6]];
+    time = 0; state = 'intro'; busy = false;
     rand = mulberry32(7);
     pxScale = (window.innerHeight * Math.min(window.devicePixelRatio, 2)) / (2 * Math.tan(THREE.MathUtils.degToRad(ctx.camera.fov / 2)));
 
-    toastEl = document.createElement('div');
-    Object.assign(toastEl.style, {
-      position: 'fixed', top: '36px', left: '50%', transform: 'translateX(-50%)', pointerEvents: 'none', zIndex: '20',
-      font: "48px 'Rubik Bubbles', system-ui, sans-serif", letterSpacing: '0.08em', opacity: '0', transition: 'opacity 0.5s',
-      textShadow: '0 3px 0 rgba(255,255,255,0.9), 0 0 20px rgba(0,0,0,0.25)',
-    });
-    document.body.appendChild(toastEl);
-
     buildWorld();
-    hydrant = buildHydrant();
-    buildEmber();
     buildSkye();
-    buildSprout();
+    hydrant = buildHydrant();
 
-    ctx.player.spawn(V(0, 0, 5), 0);
+    // TEMP exit until the masked figure (§9) is built: end of the north path.
+    const [ex, ez] = pathEnds[0];
+    const cube = mesh(new THREE.BoxGeometry(1, 1, 1), std(0x888888), ex, H(ex, ez) + 0.5, ez);
+    collide(cube);
+    ctx.interact.add(cube, () => ctx.goTo(NEXT));
+    const tmp = makeLabel('TEMP → ending');
+    tmp.position.set(ex, H(ex, ez) + 1.6, ez);
+    ctx.scene.add(tmp);
+
+    ctx.player.spawn(V(0, H(0, 2.6), 2.6), 0);
     intro(gen);
   },
 
@@ -1298,20 +1025,15 @@ export default {
     tasks = [];
     for (const fn of run) if (fn(dt) !== false) tasks.push(fn);
     for (const s of systems) s.update(dt);
-
-    if (state === 'free') {
-      const z = zoneAt(ctx.player.position);
-      if (z !== zone) { zone = z; if (z) showZone(z); }
-    }
     updateHydrant(dt);
+    updateFades();
   },
 
   dispose() {
     gen++;
-    clearTimeout(toastTimer);
-    toastEl?.remove();
-    toastEl = null;
-    tasks = []; systems = [];
+    tasks = []; systems = []; fadables = [];
+    for (const t of texCache.values()) t.dispose(); // base textures (clones are disposed with the scene)
+    texCache.clear();
     hydrant = null;
     ctx = null;
   },
