@@ -138,7 +138,7 @@ function makeFadable(root, remembered) {
   root.traverse((o) => {
     const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
     for (const m of mats) {
-      if (seen.has(m) || !m.color) continue;
+      if (seen.has(m) || !m.color || m.userData.noFade) continue;
       seen.add(m);
       entries.push({ m, color: m.color.clone(), emissive: m.emissive ? m.emissive.clone() : null, k: m.userData.k || 1 });
     }
@@ -152,11 +152,13 @@ function makeFadable(root, remembered) {
 
 function applyFade(rec, flicker) {
   const r = Math.min(1, Math.max(0, rec.remembered));
-  const sat = 0.3 + 0.7 * r;
-  const opacity = (0.3 + 0.7 * r) * flicker * rec.dip;
+  // Forgotten things fade like sun-bleached paint: paler and see-through, but still their own colour
+  // (desaturating toward grey let the green grass show through and turned the red hydrant olive).
+  const sat = 0.5 + 0.5 * r;
+  const opacity = (0.35 + 0.65 * r) * flicker * rec.dip;
   for (const e of rec.entries) {
     e.color.getHSL(_hsl);
-    e.m.color.setHSL(_hsl.h, _hsl.s * sat, _hsl.l + (1 - r) * 0.2 * (0.65 - _hsl.l));
+    e.m.color.setHSL(_hsl.h, _hsl.s * sat, _hsl.l + (1 - r) * 0.35 * Math.max(0, 0.78 - _hsl.l));
     if (e.emissive) e.m.emissive.copy(e.emissive).multiplyScalar(r);
     if (e.m.transparent) e.m.opacity = Math.min(1, opacity * e.k);
   }
@@ -253,7 +255,13 @@ function buildWorld() {
   scene.fog = new THREE.Fog(0xfff0dc, 80, 200);
   scene.add(new THREE.HemisphereLight(0xfff4e0, 0x8fdc70, 1.5));
   const key = new THREE.DirectionalLight(0xfff0d8, 1.8);
-  key.position.set(20, 40, 15);
+  key.position.set(25, 55, 18);
+  key.castShadow = true; // soft grounding shadows across the whole play area
+  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.bias = -0.0004;
+  key.shadow.normalBias = 0.04;
+  Object.assign(key.shadow.camera, { left: -58, right: 58, top: 58, bottom: -58, near: 1, far: 160 });
+  key.shadow.camera.updateProjectionMatrix();
   scene.add(key);
   // Soft glow from the middle of the world so the inward-facing rim hills stay bright.
   const fill = new THREE.PointLight(0xfff3e0, 1.1, 0, 0);
@@ -335,11 +343,12 @@ function buildCeiling() {
         vec2 uv = vec2(az * 40.0, el * 18.0);
         float dots = 1.0 - smoothstep(0.17, 0.22, length(fract(uv) - 0.5));
         col = mix(col, vec3(1.0, 0.98, 0.92), dots * 0.8);
-        gl_FragColor = vec4(pow(col, vec3(2.2)), 1.0);
+        gl_FragColor = vec4(pow(col, vec3(2.2)) * 1.4, 1.0); // linear; unlit, so lifted to read bright under ACES
         #include <colorspace_fragment>
       }`,
   }));
   dome.scale.y = CEIL_H / CEIL_R;
+  dome.userData.sky = true; // no shadows / SSAO from the ceiling
   ctx.scene.add(dome);
   every(() => { dome.material.uniforms.time.value = time; });
 
@@ -383,6 +392,7 @@ function buildCeiling() {
       g.position.copy(p).addScaledVector(n, -1.4);
       if (rho === 0) g.up.set(0, 0, -1);
       g.lookAt(g.position.x + face.x, g.position.y + face.y, g.position.z + face.z);
+      g.userData.sky = true;
       ctx.scene.add(g);
       const inner = new THREE.Group(); // the part that animates
       g.add(inner);
@@ -651,30 +661,56 @@ function buildHydrant() {
   group.add(body);
   ctx.scene.add(group);
 
-  // True colours here; the fade system washes them out according to how remembered he is.
-  const red = std(0xe8262b, { emissive: 0x3a0505, roughness: 0.45 });
-  const metal = std(0xd8c8b8, { metalness: 0.3, roughness: 0.4 });
-  const eye = new THREE.MeshBasicMaterial({ color: 0x1a1a1a });
-  const shine = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  red.userData.k = 1.6; metal.userData.k = 1.4; eye.userData.k = 2; shine.userData.k = 2;
+  // Same design as the mini hydrant on the globe (inverted.js makeHydrant) — he's the same character —
+  // scaled up to ~1.1 m. True colours here; the fade system washes them out by how remembered he is.
+  const K = 4.6;
+  const red = std(0xd62a1e, { roughness: 0.42, metalness: 0.1 });
+  const darkRed = std(0xa81d14, { roughness: 0.5, metalness: 0.1 });
+  const white = std(0xffffff, { roughness: 0.3 });
+  const black = std(0x141414, { roughness: 0.25 });
+  const cheekMat = std(0xff7a7a, { roughness: 0.6 });
+  red.userData.k = darkRed.userData.k = 1.9; // clearly red, but you can still just see through him
+  white.userData.k = black.userData.k = 2.2;
+  cheekMat.userData.k = 2;
 
-  mesh(new THREE.CylinderGeometry(0.34, 0.36, 0.12, 48), metal, 0, 0.06, 0, body);
-  mesh(new THREE.CylinderGeometry(0.24, 0.26, 0.64, 48), red, 0, 0.44, 0, body);
-  mesh(new THREE.TorusGeometry(0.27, 0.035, 12, 48), metal, 0, 0.78, 0, body).rotation.x = Math.PI / 2;
-  mesh(new THREE.SphereGeometry(0.245, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2), red, 0, 0.78, 0, body);
-  mesh(new THREE.CylinderGeometry(0.07, 0.09, 0.1, 6), metal, 0, 1.06, 0, body);
-  for (const s of [-1, 1]) {
-    const n = mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.16, 32), metal, s * 0.3, 0.52, 0, body);
-    n.rotation.z = Math.PI / 2;
-    mesh(new THREE.SphereGeometry(0.048, 24, 16), eye, s * 0.085, 0.66, 0.225, body);
-    mesh(new THREE.SphereGeometry(0.016, 12, 8), shine, s * 0.085 + 0.015, 0.68, 0.268, body);
+  const model = new THREE.Group(); // built facing +X like the mini hydrant, then turned to face +Z
+  model.rotation.y = -Math.PI / 2;
+  model.scale.setScalar(K);
+  body.add(model);
+  const add = (geo, mat, x, y, z, rx = 0, rz = 0) => {
+    const m = mesh(geo, mat, x, y, z, model);
+    m.rotation.set(rx, 0, rz);
+    return m;
+  };
+  const PI = Math.PI;
+  add(new THREE.CylinderGeometry(0.06, 0.064, 0.016, 48), darkRed, 0, 0.008, 0);              // base flange
+  add(new THREE.CylinderGeometry(0.045, 0.048, 0.14, 48), red, 0, 0.086, 0);                  // barrel
+  add(new THREE.CylinderGeometry(0.055, 0.055, 0.016, 48), darkRed, 0, 0.16, 0);             // top ring
+  add(new THREE.SphereGeometry(0.05, 48, 24, 0, PI * 2, 0, PI / 2), red, 0, 0.168, 0);        // dome cap
+  add(new THREE.CylinderGeometry(0.012, 0.014, 0.022, 6), darkRed, 0, 0.226, 0);             // bonnet nut
+  for (const s of [-1, 1]) {                                                                   // side outlets
+    add(new THREE.CylinderGeometry(0.016, 0.016, 0.03, 32), red, 0, 0.11, s * 0.055, PI / 2);
+    add(new THREE.CylinderGeometry(0.02, 0.02, 0.008, 6), darkRed, 0, 0.11, s * 0.072, PI / 2);
   }
-  const mouth = mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.12, 32), metal, 0, 0.47, 0.27, body);
-  mouth.rotation.x = Math.PI / 2;
+  add(new THREE.CylinderGeometry(0.02, 0.02, 0.026, 32), red, -0.055, 0.1, 0, 0, PI / 2);    // rear pumper outlet
 
-  const nozzle = new THREE.Object3D(); // spray comes out of the right-side nozzle (+x)
-  nozzle.position.set(0.4, 0.52, 0);
-  body.add(nozzle);
+  // Big friendly face on the front.
+  for (const s of [-1, 1]) {
+    const eye = new THREE.Group();
+    eye.position.set(0.042, 0.128, s * 0.018);
+    model.add(eye);
+    mesh(new THREE.SphereGeometry(0.012, 32, 24), white, 0, 0, 0, eye);
+    mesh(new THREE.SphereGeometry(0.0065, 24, 16), black, 0.008, -0.001, 0, eye);
+    mesh(new THREE.SphereGeometry(0.0022, 12, 8), white, 0.0135, 0.002, -0.002, eye);
+    const cheek = add(new THREE.SphereGeometry(0.007, 24, 16), cheekMat, 0.045, 0.106, s * 0.03); // rosy cheeks
+    cheek.scale.set(0.4, 0.7, 1);
+  }
+  const smile = add(new THREE.TorusGeometry(0.014, 0.0025, 12, 32, PI), black, 0.046, 0.1, 0);
+  smile.rotation.set(0, PI / 2, PI); // lower half-circle, facing +X
+
+  const nozzle = new THREE.Object3D(); // spray comes out of the side outlet that ends up on his right (+x)
+  nozzle.position.set(0, 0.11, -0.085);
+  model.add(nozzle);
 
   const wisps = new Particles({ count: 60, color: 0xffb7ae, color2: 0xffffff, size: 0.07, gravity: -0.35 });
   const spray = new Particles({ count: 220, color: 0x7fd0ff, color2: 0xe8f8ff, size: 0.15, gravity: 9.8, drag: 0.6 });
@@ -752,8 +788,8 @@ async function intro(g) {
 
   const eye = V(0, H(0, 2.6) + 1.6, 2.6);
   const look = V(0, gy + 0.75, 0);
-  const face = V(0, gy + 0.64, 0.24);
-  const from = V(0, gy + 0.66, 0.5);  // the globe's zoom ends right up against his face
+  const face = V(0, gy + 0.58, 0.2);
+  const from = V(0, gy + 0.6, 0.48);  // the globe's zoom ends right up against his face
   const tmpLook = V(0, 0, 0);
 
   // Pull back from his face to where the player is standing.
@@ -918,14 +954,14 @@ const GALAXY_FRAG = `
     float star = step(0.86, hash(floor(g))) * smoothstep(0.14, 0.0, length(fract(g) - 0.5));
     col += star;
     col += vec3(0.7, 0.45, 1.0) * smoothstep(0.72, 0.98, r) * 1.3;
-    gl_FragColor = vec4(col, smoothstep(1.0, 0.93, r));
+    gl_FragColor = vec4(pow(col, vec3(2.2)), smoothstep(1.0, 0.93, r)); // linear HDR: the bright core blooms
     #include <colorspace_fragment>
   }`;
 
 function makePortal(mat) {
   const p = new THREE.Group();
   mesh(new THREE.CircleGeometry(1, 96), mat, 0, 0, 0, p);
-  mesh(new THREE.TorusGeometry(1, 0.045, 16, 96), new THREE.MeshBasicMaterial({ color: 0xc9a6ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }), 0, 0, 0, p);
+  mesh(new THREE.TorusGeometry(1, 0.045, 16, 96), new THREE.MeshBasicMaterial({ color: new THREE.Color(0xc9a6ff).multiplyScalar(2.5), transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }), 0, 0, 0, p);
   p.scale.setScalar(0.0001);
   p.visible = false;
   ctx.scene.add(p);
@@ -1193,8 +1229,9 @@ function buildInfernal() {
   cracks.wrapS = cracks.wrapT = THREE.RepeatWrapping;
   const skin = std(0xffffff, { map: cracks, emissive: 0xffffff, emissiveMap: cracks, emissiveIntensity: 1.2, roughness: 0.85 });
   const horn = std(0x1a0f0c, { roughness: 0.5, emissive: 0x3a0a00, emissiveIntensity: 0.6 });
-  const glow = new THREE.MeshBasicMaterial({ color: 0xffe36b });
-  const molten = new THREE.MeshBasicMaterial({ color: 0xff7a1a });
+  const glow = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xffe36b).multiplyScalar(3) });   // HDR → blooms
+  const molten = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xff7a1a).multiplyScalar(3) });
+  glow.userData.noFade = molten.userData.noFade = true;
   const ball = new THREE.SphereGeometry(1, 48, 32);
 
   const body = new THREE.Group();
@@ -1387,7 +1424,7 @@ const TORNADO_FRAG = `
     float streak = smoothstep(0.1, 1.0, s1 * 0.6 + s2 * 0.4);
     float edge = smoothstep(0.0, 0.1, v) * smoothstep(1.0, 0.7, v);
     vec3 col = mix(vec3(0.78, 0.76, 0.92), vec3(1.0), streak);
-    gl_FragColor = vec4(col, (0.16 + 0.55 * streak) * edge * fade);
+    gl_FragColor = vec4(pow(col, vec3(2.2)), (0.16 + 0.55 * streak) * edge * fade);
     #include <colorspace_fragment>
   }`;
 
@@ -1644,7 +1681,9 @@ function buildRockGuardian() {
   mesh(boulderGeo(0.85, 5), rockMat, 0, 4.25, 0.25, body);
   mesh(boulderGeo(0.5, 9), rockMat, 0, 4.85, 0.75, body).scale.set(1.1, 0.4, 0.5); // heavy brow
   // One big glowing gold eye — no pupil.
-  mesh(new THREE.SphereGeometry(0.32, 48, 32), new THREE.MeshBasicMaterial({ color: 0xffc83a }), 0, 4.4, 0.98, body);
+  const eyeMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0xffc83a).multiplyScalar(3) }); // HDR → blooms
+  eyeMat.userData.noFade = true; // the eye stays fully glowing gold
+  mesh(new THREE.SphereGeometry(0.32, 48, 32), eyeMat, 0, 4.4, 0.98, body);
   const halo = glowSprite('rgba(255,200,60,0.9)', 1.8);
   halo.position.set(0, 4.4, 1.2);
   body.add(halo);
@@ -1789,7 +1828,7 @@ const POOL_FRAG = `
     col += vec3(0.9, 1.0, 1.0) * caustic * 0.35;
     float edge = smoothstep(grow, grow - 0.06, r);
     col = mix(vec3(1.0), col, edge);
-    gl_FragColor = vec4(col, 0.85);
+    gl_FragColor = vec4(pow(col, vec3(2.2)), 0.85);
     #include <colorspace_fragment>
   }`;
 
@@ -2324,6 +2363,17 @@ async function revealMaskedFigure(mf) {
   ctx.goTo(NEXT);
 }
 
+function setupShadows() {
+  ctx.scene.traverse((o) => {
+    if (!o.isMesh) return;
+    for (let a = o; a; a = a.parent) if (a.userData.sky) { o.userData.noSSAO = true; return; }
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    o.receiveShadow = mats.some((m) => m.isMeshStandardMaterial);
+    // Faded (see-through) characters, particles and custom shaders don't cast.
+    o.castShadow = mats.every((m) => !m.transparent && !m.isShaderMaterial);
+  });
+}
+
 // ---------- scene ----------
 export default {
   name: NAME,
@@ -2346,6 +2396,11 @@ export default {
     hydrant = buildHydrant();
 
     masked = buildMaskedFigure();
+    setupShadows();
+
+    // Tuned for the ACES pipeline: the bright pastels need exposure below 1 to keep their colour;
+    // bloom only catches genuinely hot things (glowing eyes, portals, fire); light SSAO grounds the props.
+    ctx.post?.set({ exposure: 0.62, bloomStrength: 0.5, bloomRadius: 0.55, bloomThreshold: 1.5, ssao: true, ssaoRadius: 0.6, vignette: 0.25 });
 
     ctx.player.spawn(V(0, H(0, 2.6), 2.6), 0);
     intro(gen);
