@@ -13,6 +13,7 @@ export class Interact {
     this.current = null;
 
     this._ray = new THREE.Raycaster();
+    this._ray.camera = camera; // required if a target/occluder contains sprites
     this._center = new THREE.Vector2(0, 0);
 
     this.el = document.createElement('div');
