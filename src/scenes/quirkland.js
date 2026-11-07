@@ -9,7 +9,8 @@ import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometr
 // Every character has a `remembered` value (0–1) that controls how faded / desaturated they look.
 // Inhabitants so far (E): the Intergalactic Kangaroo, the Infernal, the Kite (Skye), the Rock Guardian,
 // Water Girl and Tongue Guy.
-// TEMP: the grey cube at the end of the north path goes to 'ending' until the masked figure (§9) is built.
+// The Masked Figure (§9) stands at the end of the north path. The hydrant says "He's unfamiliar." the first time
+// he's on screen; E → he removes his mask → the camera zooms into the ruby → goTo('ending').
 
 const NAME = 'quirkland';
 const NEXT = 'ending';
@@ -27,6 +28,7 @@ const REMEMBERED = { hydrant: 0.2, kangaroo: 1.0, infernal: 0.9, kite: 0.85, roc
 const SPOTS = {
   kangaroo: [29, 12], infernal: [-15, -26], kite: [20, -16],
   rock: [-25, 11], water: [-3, 31], tongue: [-34, -7],
+  masked: [-8, -40], // end of the north path
 };
 
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
@@ -58,6 +60,7 @@ let pathPts = [];     // sampled path centre points (keeps props off the paths)
 let pathEnds = [];
 let props = [];       // occupied [x, z, radius]
 let shake = 0;        // camera shake amount (decays)
+let masked = null;
 
 const alive = (g) => ctx !== null && g === gen;
 
@@ -109,26 +112,6 @@ function mesh(geo, mat, x = 0, y = 0, z = 0, parent = ctx.scene) {
 }
 
 function collide(obj) { ctx.player.colliders.push(obj); return obj; }
-
-function makeLabel(text, { w = 2.4 } = {}) {
-  const c = document.createElement('canvas');
-  c.width = 512; c.height = 128;
-  const g = c.getContext('2d');
-  g.fillStyle = 'rgba(0,0,0,0.55)';
-  g.beginPath();
-  g.roundRect(4, 4, c.width - 8, c.height - 8, 56);
-  g.fill();
-  g.fillStyle = '#fff';
-  g.font = '700 54px system-ui, sans-serif';
-  g.textAlign = 'center';
-  g.textBaseline = 'middle';
-  g.fillText(text, c.width / 2, c.height / 2 + 4);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex }));
-  sprite.scale.set(w, w / 4, 1);
-  return sprite;
-}
 
 // ---------- terrain height ----------
 const HILLS = [[20, -16, 4.5, 7], [-24, 10, 5, 9], [8, 27, 3.5, 6.5], [-15, -27, 4.5, 8], [31, 13, 3.2, 7], [-33, -8, 3.8, 7]];
@@ -725,7 +708,10 @@ function updateHydrant(dt) {
     }
     g.position.y += (H(g.position.x, g.position.z) - g.position.y) * Math.min(1, dt * 15);
   }
-  if (h.mode !== 'manual' && d > 0.01) {
+  if (h.watch) {
+    // Staring at something (the masked figure).
+    g.rotation.y = lerpAngle(g.rotation.y, Math.atan2(h.watch.x - g.position.x, h.watch.z - g.position.z), 1 - Math.exp(-dt * 6));
+  } else if (h.mode !== 'manual' && d > 0.01) {
     g.rotation.y = lerpAngle(g.rotation.y, Math.atan2(dx, dz), 1 - Math.exp(-dt * 8));
   }
 
@@ -2126,6 +2112,218 @@ async function tongueStretch(tg, g) {
   await faceToward(tg.group, player.position, 0.4);
 }
 
+// ===== 7. The Masked Figure (§9) — not from a child's imagination, so never faded =====
+function buildMaskedFigure() {
+  const [x, z] = SPOTS.masked;
+  const g = standAt(SPOTS.masked);
+  const black = std(0x070707, { roughness: 0.75, metalness: 0.1 });
+  const voidMat = new THREE.MeshBasicMaterial({ color: 0x000000 }); // pure darkness, no shading
+  const maskMat = std(0xebe4d6, { roughness: 0.35, side: THREE.DoubleSide, emissive: 0x6e6a62, emissiveIntensity: 0.6 });
+  const rubyMat = std(0xd0002a, { roughness: 0.12, metalness: 0.3, emissive: 0x3a0006, emissiveIntensity: 1, flatShading: true });
+
+  const body = new THREE.Group();
+  g.add(body);
+  // Impossibly long, thin legs.
+  for (const sx of [-1, 1]) {
+    const leg = new THREE.CatmullRomCurve3([V(sx * 0.12, 3.95, 0), V(sx * 0.13, 2.0, 0.08), V(sx * 0.14, 0.12, 0.02)]);
+    mesh(taperTube(leg, 64, 0.075, 0.04, 16), black, 0, 0, 0, body);
+    mesh(new THREE.CapsuleGeometry(0.04, 0.32, 8, 16).rotateX(Math.PI / 2), black, sx * 0.14, 0.05, 0.14, body);
+  }
+  mesh(new THREE.SphereGeometry(1, 32, 24), black, 0, 3.95, 0, body).scale.set(0.17, 0.12, 0.12);
+  const prof = [[0.13, 3.95], [0.11, 4.4], [0.17, 5.2], [0.2, 5.65], [0.12, 5.85], [0.05, 5.95]].map(([r, y]) => new THREE.Vector2(r, y));
+  mesh(new THREE.LatheGeometry(new THREE.SplineCurve(prof).getPoints(32), 48), black, 0, 0, 0, body).scale.z = 0.6;
+  const neck = mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.6, 16), black, 0, 6.2, 0, body);
+
+  // Head: under the mask there is nothing but darkness — and a ruby.
+  const head = new THREE.Group();
+  head.position.set(0, 6.72, 0);
+  body.add(head);
+  const skull = mesh(new THREE.SphereGeometry(0.26, 48, 32), voidMat, 0, 0, 0, head);
+  skull.scale.set(0.85, 1.15, 0.9);
+  const mask = mesh(new THREE.SphereGeometry(0.3, 48, 32, Math.PI / 2 - 0.65 * Math.PI, 1.3 * Math.PI, 0.05, Math.PI - 0.1), maskMat, 0, 0, 0, skull);
+  const rubyProf = [[0, -0.05], [0.045, 0], [0.034, 0.024], [0, 0.03]].map(([r, y]) => new THREE.Vector2(r, y));
+  const ruby = mesh(new THREE.LatheGeometry(rubyProf, 8), rubyMat, 0, 0.11, 0.21, head); // on his forehead, under the mask
+  ruby.rotation.x = Math.PI / 2;
+
+  // Long arms with long fingers (shoulder and elbow pivots so he can reach his face).
+  const arms = [];
+  for (const sx of [-1, 1]) {
+    const shoulder = new THREE.Group();
+    shoulder.position.set(sx * 0.24, 5.75, 0);
+    shoulder.rotation.z = sx * 0.06;
+    body.add(shoulder);
+    mesh(taperTube(new THREE.CatmullRomCurve3([V(0, 0, 0), V(0, -0.7, 0.02), V(0, -1.4, 0)]), 32, 0.05, 0.035, 12), black, 0, 0, 0, shoulder);
+    const elbow = new THREE.Group();
+    elbow.position.set(0, -1.4, 0);
+    shoulder.add(elbow);
+    mesh(taperTube(new THREE.CatmullRomCurve3([V(0, 0, 0), V(0, -0.65, 0.02), V(0, -1.3, 0)]), 32, 0.035, 0.025, 12), black, 0, 0, 0, elbow);
+    const hand = new THREE.Group();
+    hand.position.set(0, -1.3, 0);
+    elbow.add(hand);
+    const fingers = [];
+    for (let f = 0; f < 4; f++) {
+      const fx = (f - 1.5) * 0.025;
+      const fing = new THREE.Group();
+      fing.position.set(fx, 0, 0);
+      hand.add(fing);
+      mesh(taperTube(new THREE.CatmullRomCurve3([V(0, 0, 0), V(fx * 0.5, -0.2, 0.02), V(fx, -0.4, 0.05)]), 16, 0.012, 0.005, 8), black, 0, 0, 0, fing);
+      fingers.push(fing);
+    }
+    arms.push({ shoulder, elbow, hand, fingers });
+  }
+
+  const blocker = mesh(new THREE.CylinderGeometry(0.45, 0.45, 7, 16), new THREE.MeshBasicMaterial(), 0, 3.5, 0, g);
+  blocker.visible = false;
+  collide(blocker);
+
+  const shadow = mesh(new THREE.CircleGeometry(1.4, 48).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false }), x, H(x, z) + 0.06, z);
+  shadow.renderOrder = 1;
+  const murk = new Particles({ count: 160, color: 0x000000, color2: 0x1c1c1c, size: 0.25, grow: 2.2, gravity: -0.35, drag: 0.4 });
+
+  const mf = { group: g, body, head, skull, mask, ruby, arms, murk, seen: false, revealing: false, headYaw: 0 };
+
+  const hp = V(0, 0, 0);
+  let wispT = 0;
+  every((dt) => {
+    // Barely moves. Just the slow sway — and the head that always turns to follow you.
+    body.rotation.z = Math.sin(time * 0.4) * 0.012;
+    if (!mf.revealing) {
+      const p = ctx.player.position;
+      const want = THREE.MathUtils.clamp(lerpAngle(0, Math.atan2(p.x - g.position.x, p.z - g.position.z) - g.rotation.y, 1), -1.1, 1.1);
+      mf.headYaw += (want - mf.headYaw) * Math.min(1, dt * 0.8);
+      head.rotation.y = mf.headYaw;
+      head.rotation.z = 0.18 + Math.sin(time * 0.3) * 0.04;
+      // Occasional finger twitch.
+      for (const a of arms) a.fingers.forEach((f, i) => { f.rotation.x = Math.max(0, Math.sin(time * 0.7 + i * 1.3)) ** 8 * 0.5; });
+    }
+    wispT -= dt;
+    if (wispT <= 0) {
+      wispT = 0.08;
+      const a = Math.random() * 6.28, h = Math.random() * 6.5;
+      murk.emit(V(g.position.x + Math.cos(a) * 0.25, g.position.y + h, g.position.z + Math.sin(a) * 0.25), V(Math.cos(a) * 0.15, 0.2, Math.sin(a) * 0.15), 2.2);
+    }
+  });
+
+  ctx.interact.add(g, () => revealMaskedFigure(mf), { distance: 7 });
+  return mf;
+}
+
+// "He's unfamiliar." — the first time the figure is actually on screen (in view, close enough, not hidden behind a hill).
+const _frustum = new THREE.Frustum(), _pm = new THREE.Matrix4(), _ray = new THREE.Raycaster();
+let sightT = 0;
+function checkFirstSight(mf, dt) {
+  if (mf.seen || state !== 'free') return;
+  sightT -= dt;
+  if (sightT > 0) return;
+  sightT = 0.25;
+  const cam = ctx.camera;
+  // Aim at his middle: he has to be fairly close and near the centre of the view, not a speck at the edge.
+  const mid = mf.group.position.clone().setY(mf.group.position.y + 3.5);
+  const dist = cam.position.distanceTo(mid);
+  if (dist > 25) return;
+  cam.updateMatrixWorld();
+  _frustum.setFromProjectionMatrix(_pm.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
+  if (!_frustum.containsPoint(mid)) return;
+  const toMid = mid.clone().sub(cam.position).normalize();
+  if (toMid.dot(V(0, 0, -1).applyQuaternion(cam.quaternion)) < Math.cos(0.5)) return;
+  _ray.set(cam.position, toMid);
+  _ray.far = dist - 1;
+  if (_ray.intersectObjects(ctx.player.colliders, false).length) return;
+  mf.seen = true;
+  sayUnfamiliar(mf);
+}
+
+async function sayUnfamiliar(mf) {
+  const g = gen;
+  mf.lineDone = (async () => {
+    while (busy || ctx.dialogue.active) { await wait(0.3); if (!alive(g)) return; }
+    hydrant.watch = mf.group.position;
+    ctx.audio.tone(98, 2.5, { type: 'sine', volume: 0.12 });
+    ctx.audio.tone(104, 2.5, { type: 'sine', volume: 0.1 }); // dissonant
+    await ctx.dialogue.say("He's unfamiliar.", { speaker: HYDRANT, color: HYDRANT_COLOR });
+    if (alive(g)) hydrant.watch = null;
+  })();
+  return mf.lineDone;
+}
+
+async function revealMaskedFigure(mf) {
+  if (busy || state !== 'free' || mf.revealing) return;
+  const g = gen;
+  const { player, camera, audio } = ctx;
+  if (!mf.seen) { mf.seen = true; sayUnfamiliar(mf); }
+  busy = true;
+  ctx.interact.enabled = false;
+  await mf.lineDone;
+  if (!alive(g)) return;
+
+  // The camera locks.
+  player.enabled = false;
+  mf.revealing = true;
+  const camPos = camera.position.clone();
+  const camQ = camera.quaternion.clone();
+
+  // He looks straight at you...
+  const h0 = mf.head.rotation.y, z0 = mf.head.rotation.z;
+  const target = THREE.MathUtils.clamp(lerpAngle(0, Math.atan2(camPos.x - mf.group.position.x, camPos.z - mf.group.position.z) - mf.group.rotation.y, 1), -1.2, 1.2);
+  audio.tone(55, 6, { type: 'sine', volume: 0.15 });
+  audio.tone(58, 6, { type: 'sine', volume: 0.1 });
+  await tween(1.4, (t) => {
+    const e = ease(t);
+    mf.head.rotation.y = h0 + (target - h0) * e;
+    mf.head.rotation.z = z0 * (1 - e);
+    // tilt the face down toward the player
+    mf.head.rotation.x = 0.25 * e;
+  });
+  if (!alive(g)) return;
+
+  // ...slowly raises one long hand to the mask...
+  const arm = mf.arms[0];
+  await tween(2.6, (t) => {
+    const e = ease(t);
+    arm.shoulder.rotation.x = -1.61 * e;
+    arm.shoulder.rotation.z = -0.06 + 0.12 * e;
+    arm.elbow.rotation.x = -2.39 * e;
+    arm.fingers.forEach((f) => { f.rotation.x = 0.6 * e; });
+  });
+  if (!alive(g)) return;
+  await wait(0.6);
+  if (!alive(g)) return;
+
+  // ...and lifts it away. Nothing underneath but darkness, and a ruby.
+  arm.hand.attach(mf.mask);
+  audio.noise(0.4, { volume: 0.05 });
+  await tween(2.8, (t) => {
+    const e = ease(t);
+    arm.shoulder.rotation.x = -1.61 + 1.0 * e;
+    arm.shoulder.rotation.z = 0.06 - 0.55 * e;
+    arm.elbow.rotation.x = -2.39 + 1.9 * e;
+  });
+  if (!alive(g)) return;
+  await wait(1.0);
+  if (!alive(g)) return;
+
+  // Zoom smoothly into the ruby until it fills the screen.
+  const rubyPos = V(0, 0, 0);
+  mf.ruby.getWorldPosition(rubyPos);
+  const facing = V(0, 1, 0).transformDirection(mf.ruby.matrixWorld); // the gem's table faces out of his forehead
+  const end = rubyPos.clone().addScaledVector(facing, 0.13);
+  const look = V(0, 0, 0), fwd0 = V(0, 0, -1).applyQuaternion(camQ).multiplyScalar(5).add(camPos);
+  const fov0 = camera.fov;
+  await tween(3.6, (t) => {
+    const e = ease(t);
+    camera.position.lerpVectors(camPos, end, e);
+    look.lerpVectors(fwd0, rubyPos, Math.min(1, ease(Math.min(1, t * 2.5))));
+    camera.lookAt(look);
+    camera.fov = fov0 + (25 - fov0) * e;
+    camera.updateProjectionMatrix();
+  });
+  if (!alive(g)) return;
+  await wait(0.3);
+  if (!alive(g)) return;
+  ctx.goTo(NEXT);
+}
+
 // ---------- scene ----------
 export default {
   name: NAME,
@@ -2134,7 +2332,7 @@ export default {
     ctx = c;
     gen++;
     tasks = []; systems = []; fadables = []; pathPts = []; pathEnds = []; props = [[0, 0, 6], ...Object.values(SPOTS).map(([x, z]) => [x, z, 5])];
-    time = 0; state = 'intro'; busy = false; shake = 0;
+    time = 0; state = 'intro'; busy = false; shake = 0; sightT = 0;
     rand = mulberry32(7);
     pxScale = (window.innerHeight * Math.min(window.devicePixelRatio, 2)) / (2 * Math.tan(THREE.MathUtils.degToRad(ctx.camera.fov / 2)));
 
@@ -2147,14 +2345,7 @@ export default {
     buildTongueGuy();
     hydrant = buildHydrant();
 
-    // TEMP exit until the masked figure (§9) is built: end of the north path.
-    const [ex, ez] = pathEnds[0];
-    const cube = mesh(new THREE.BoxGeometry(1, 1, 1), std(0x888888), ex, H(ex, ez) + 0.5, ez);
-    collide(cube);
-    ctx.interact.add(cube, () => ctx.goTo(NEXT));
-    const tmp = makeLabel('TEMP → ending');
-    tmp.position.set(ex, H(ex, ez) + 1.6, ez);
-    ctx.scene.add(tmp);
+    masked = buildMaskedFigure();
 
     ctx.player.spawn(V(0, H(0, 2.6), 2.6), 0);
     intro(gen);
@@ -2169,6 +2360,7 @@ export default {
     for (const s of systems) s.update(dt);
     updateHydrant(dt);
     updateFades();
+    checkFirstSight(masked, dt);
     // Camera shake rides on top of wherever the player put the camera this frame.
     if (shake > 0) {
       const c = ctx.camera.position;
@@ -2183,6 +2375,7 @@ export default {
     for (const t of texCache.values()) t.dispose(); // base textures (clones are disposed with the scene)
     texCache.clear();
     hydrant = null;
+    masked = null;
     ctx = null;
   },
 };
