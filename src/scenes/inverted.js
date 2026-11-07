@@ -37,6 +37,11 @@ const T = {
   zoomEnd: 7.0,    // camera has zoomed into the fire hydrant → goTo('quirkland')
 };
 
+// Post-processing looks: the dark red world needs an exposure lift under ACES; the bright mini
+// world after E needs it back down (blended during the reveal).
+const POST_DARK = { exposure: 1.8, bloomStrength: 0.5, bloomThreshold: 0.75 };
+const POST_MINI = { exposure: 0.95, bloomStrength: 0.22, bloomThreshold: 1.1 };
+
 let ctx = null;
 let s = null;   // per-run state
 let seq = null; // globe sequence state (null until E is pressed)
@@ -383,7 +388,7 @@ function buildEnvironment(scene, world, colliders) {
   const hemi = new THREE.HemisphereLight(0x8a1a1a, 0x2a0505, 1.2);
   const top = new THREE.DirectionalLight(0xff3a28, 0.9);
   top.position.set(-20, 40, 10);
-  const below = new THREE.DirectionalLight(0x9a1810, 0.6); // lights the ceiling the player stands on
+  const below = new THREE.DirectionalLight(0x9a1810, 1.6); // lights the ceiling the player stands on
   below.position.set(15, -40, -10);
   scene.add(hemi, top, below);
 
@@ -615,7 +620,7 @@ varying float vH;
 varying float vShade;
 void main(){
   vec3 col=mix(vec3(0.3,0.66,0.16),vec3(0.72,0.95,0.36),vH)*vShade;
-  gl_FragColor=vec4(col,1.0);
+  gl_FragColor=vec4(pow(col,vec3(2.2)),1.0); // sRGB-authored colour → linear (tone mapping + sRGB happen in post)
 }
 `;
 
@@ -726,7 +731,8 @@ function makeLollipop() {
   const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, h, 8), new THREE.MeshStandardMaterial({ color: 0xfdfaf2, roughness: 0.6 }));
   stick.position.y = h / 2;
   const palettes = [['#ff4f8b', '#ffd23f'], ['#3ec5ff', '#ff6fb5'], ['#7ae36b', '#ff9f1c'], ['#b06bff', '#4fe3c1']];
-  const face = new THREE.MeshStandardMaterial({ map: swirlTexture(palettes[Math.floor(Math.random() * palettes.length)]), roughness: 0.25, emissive: 0xffffff, emissiveIntensity: 0.08 });
+  const swirl = swirlTexture(palettes[Math.floor(Math.random() * palettes.length)]);
+  const face = new THREE.MeshStandardMaterial({ map: swirl, emissiveMap: swirl, emissive: 0xffffff, emissiveIntensity: 0.45, roughness: 0.35 });
   const edge = candyMat(0xffffff);
   const disc = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.022, 32), [edge, face, face]);
   disc.rotation.z = PI / 2; // face toward ±X (the camera)
@@ -1206,10 +1212,15 @@ function updateGlobeSequence(dt) {
   // 2. The bright mini world with its fire hydrant.
   const r = t - T.error;
   mini.update(dt, clamp01(r / 0.45));
+  const pk = smooth(clamp01(r / 0.6));
+  const blend = {};
+  for (const key of Object.keys(POST_DARK)) blend[key] = POST_DARK[key] + (POST_MINI[key] - POST_DARK[key]) * pk;
+  ctx.post?.set(blend);
   g.globe.scale.setScalar(0.85 + 0.15 * easeOutBack(clamp01(r / 0.5)));
   g.orbit.rotation.z += dt * 0.6;
   g.orbitMat.opacity = 0.6 * (1 - clamp01(r / 0.5));
-  s.lights.hemi.intensity = 1.2 * (1 - 0.5 * clamp01(r / 1.0)); // the dark world dims next to it
+  const L = s.lights, base = s.lightBase;
+  L.hemi.intensity = base.hemi * (1 - 0.5 * clamp01(r / 1.0)); // the dark world dims next to it
 
   // 3. The whole dark inverted world is pulled into the globe (swirling shrink about its centre).
   if (t > T.pull) {
@@ -1221,9 +1232,9 @@ function updateGlobeSequence(dt) {
     w.position.copy(GLOBE).sub(GLOBE.clone().multiplyScalar(scale).applyQuaternion(w.quaternion));
     w.visible = c < 1;
     const kk = 1 - c;
-    s.lights.hemi.intensity = 0.6 * kk;
-    s.lights.top.intensity = 0.9 * kk;
-    s.lights.below.intensity = 0.6 * kk;
+    L.hemi.intensity = base.hemi * 0.5 * kk;
+    L.top.intensity = base.top * kk;
+    L.below.intensity = base.below * kk;
     s.scene.background.copy(seq.bg0).multiplyScalar(kk);
     s.scene.fog.color.copy(seq.fog0).multiplyScalar(kk);
     s.scene.fog.density = 0.022 * kk;
@@ -1271,13 +1282,16 @@ export default {
     ctx = c;
     seq = null;
     const { scene, player, interact } = ctx;
+    // ACES tone mapping crushes this dark red world; lift exposure and let the glows bloom a little.
+    ctx.post?.set({ ...POST_DARK, ssaoRadius: 0.8 });
     const world = new THREE.Group(); // everything that gets pulled into the globe
     scene.add(world);
     const lights = buildEnvironment(scene, world, player.colliders);
     const plate = buildPressurePlate(world);
     const globe = buildGlobe(scene, world, player.colliders);
 
-    s = { ...plate, scene, world, lights, globe, time: 0, flash: 0, active: 0, pendingFlip: null, wasGrounded: false, flips: 0 };
+    const lightBase = { hemi: lights.hemi.intensity, top: lights.top.intensity, below: lights.below.intensity };
+    s = { ...plate, scene, world, lights, lightBase, globe, time: 0, flash: 0, active: 0, pendingFlip: null, wasGrounded: false, flips: 0 };
 
     // Pressure plate: jumping while directly vertically opposite the ring (or on it) flips gravity.
     player.onJump((p) => {
