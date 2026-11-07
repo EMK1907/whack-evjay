@@ -7,7 +7,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // Arrival: the globe transition zooms into the Fire Hydrant; the camera pulls back to the player standing
 // right in front of him, and his intro cutscene plays. Afterwards he follows the player as a companion.
 // Every character has a `remembered` value (0–1) that controls how faded / desaturated they look.
-// Inhabitants so far (E): the Kite (Skye).
+// Inhabitants so far (E): the Intergalactic Kangaroo, the Infernal and the Kite (Skye).
 // TEMP: the grey cube at the end of the north path goes to 'ending' until the masked figure (§9) is built.
 
 const NAME = 'quirkland';
@@ -20,7 +20,10 @@ const CEIL_R = 95, CEIL_H = 34; // ceiling dome (ellipsoid) radius / height
 const MOUTH_SIZE = 5.5;
 
 // How much children remember each character: 1 = bright and strong, 0 = gone.
-const REMEMBERED = { hydrant: 0.2, kite: 1.0 };
+const REMEMBERED = { hydrant: 0.2, kangaroo: 1.0, infernal: 0.9, kite: 0.85 };
+
+// Where the inhabitants live (kept clear of candy and trees).
+const SPOTS = { kangaroo: [29, 12], infernal: [-15, -26], kite: [20, -16] };
 
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 
@@ -810,6 +813,7 @@ async function intro(g) {
 async function hydrantAbility() {
   if (busy || state !== 'free') return;
   busy = true;
+  ctx.interact.enabled = false;
   const g = gen;
   const { dialogue, audio } = ctx;
   hydrant.mode = 'stay'; // faces the player, so his side nozzle points across the view
@@ -851,6 +855,7 @@ async function hydrantAbility() {
   await dialogue.say('...It used to reach the clouds. Back when they remembered me.', { speaker: HYDRANT, color: HYDRANT_COLOR });
   if (!alive(g)) return;
   hydrant.mode = 'follow';
+  ctx.interact.enabled = true;
   busy = false;
 }
 
@@ -859,6 +864,7 @@ async function hydrantAbility() {
 async function meet(who) {
   if (busy || state !== 'free') return;
   busy = true;
+  ctx.interact.enabled = false; // no "Press E" prompt while a demo plays
   const g = gen;
   await faceToward(who.group, ctx.player.position, 0.4);
   if (!alive(g)) return;
@@ -868,6 +874,7 @@ async function meet(who) {
   if (!alive(g)) return;
   await ctx.dialogue.say(who.reaction, { speaker: HYDRANT, color: HYDRANT_COLOR });
   if (!alive(g)) return;
+  ctx.interact.enabled = true;
   busy = false;
 }
 
@@ -877,116 +884,720 @@ function faceToward(obj, p, sec) {
   return tween(sec, (k) => { obj.rotation.y = lerpAngle(r0, r1, ease(k)); });
 }
 
-// --- Skye the kite (air) — flies above the hill north-east of the meadow ---
-function buildSkye() {
-  const [ax, az] = HILLS[0];
+// Tube whose radius tapers from r0 to r1 along the curve (horns, tails).
+function taperTube(curve, T, r0, r1, R = 16) {
+  const geo = new THREE.TubeGeometry(curve, T, 1, R, false);
+  const pos = geo.attributes.position;
+  const c = V(0, 0, 0), v = V(0, 0, 0);
+  for (let i = 0; i <= T; i++) {
+    curve.getPointAt(i / T, c);
+    const r = r0 + (r1 - r0) * (i / T);
+    for (let j = 0; j <= R; j++) {
+      const idx = i * (R + 1) + j;
+      v.fromBufferAttribute(pos, idx).sub(c).multiplyScalar(r);
+      pos.setXYZ(idx, c.x + v.x, c.y + v.y, c.z + v.z);
+    }
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function standAt([x, z]) {
   const g = new THREE.Group();
-  g.position.set(ax, H(ax, az), az);
-  g.rotation.y = Math.atan2(-ax, -az);
+  g.position.set(x, H(x, z), z);
+  g.rotation.y = Math.atan2(-x, -z); // face the middle of the world
   ctx.scene.add(g);
-  props.push([ax, az, 2.5]);
+  return g;
+}
+
+// ===== 1. The Intergalactic Kangaroo (remembered 1.0) =====
+const GALAXY_VERT = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }';
+const GALAXY_FRAG = `
+  uniform float time; varying vec2 vUv;
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  void main() {
+    vec2 p = vUv * 2.0 - 1.0;
+    float r = length(p);
+    if (r > 1.0) discard;
+    float a = atan(p.y, p.x);
+    float arms = pow(0.5 + 0.5 * sin(a * 3.0 + log(r + 0.05) * 6.0 - time * 4.0), 3.0);
+    vec3 col = mix(vec3(0.03, 0.01, 0.1), mix(vec3(0.5, 0.15, 0.9), vec3(0.2, 0.75, 1.0), r), arms * (1.0 - r * 0.5));
+    col += vec3(1.0, 0.85, 1.0) * exp(-r * 6.0) * 1.6;
+    vec2 g = vec2(a * 8.0 - time * 1.5 + r * 4.0, r * 22.0);
+    float star = step(0.86, hash(floor(g))) * smoothstep(0.14, 0.0, length(fract(g) - 0.5));
+    col += star;
+    col += vec3(0.7, 0.45, 1.0) * smoothstep(0.72, 0.98, r) * 1.3;
+    gl_FragColor = vec4(col, smoothstep(1.0, 0.93, r));
+    #include <colorspace_fragment>
+  }`;
+
+function makePortal(mat) {
+  const p = new THREE.Group();
+  mesh(new THREE.CircleGeometry(1, 96), mat, 0, 0, 0, p);
+  mesh(new THREE.TorusGeometry(1, 0.045, 16, 96), new THREE.MeshBasicMaterial({ color: 0xc9a6ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }), 0, 0, 0, p);
+  p.scale.setScalar(0.0001);
+  p.visible = false;
+  ctx.scene.add(p);
+  return p;
+}
+
+function buildKangaroo() {
+  const g = standAt(SPOTS.kangaroo);
+  const suit = std(0x1b2a6b, { roughness: 0.4, metalness: 0.15 });
+  const dark = std(0x0d0d18, { roughness: 0.35, metalness: 0.2 });
+  const fur = std(0xc9773c, { roughness: 0.85 });
+  const furLight = std(0xf3cfa0, { roughness: 0.85 });
+  const white = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const pupil = new THREE.MeshBasicMaterial({ color: 0x111111 });
+  const gold = std(0xffd23f, { emissive: 0xffb000, emissiveIntensity: 0.8, roughness: 0.3, metalness: 0.4 });
+  const ball = new THREE.SphereGeometry(1, 48, 32);
+
+  const body = new THREE.Group();
+  g.add(body);
+  const torso = mesh(ball, suit, 0, 1.45, 0, body);
+  torso.scale.set(0.5, 0.75, 0.45);
+  torso.rotation.x = 0.15;
+  mesh(ball, dark, 0, 1.33, 0.13, body).scale.set(0.36, 0.52, 0.34);
+  // Chest emblem: a little gold star.
+  const starShape = new THREE.Shape();
+  for (let i = 0; i < 10; i++) {
+    const a = Math.PI / 2 + (i * Math.PI) / 5, r = i % 2 ? 0.42 : 1;
+    i ? starShape.lineTo(Math.cos(a) * r, Math.sin(a) * r) : starShape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  const emblem = mesh(new THREE.ExtrudeGeometry(starShape, { depth: 0.15, bevelEnabled: true, bevelSize: 0.12, bevelThickness: 0.1, bevelSegments: 6, curveSegments: 12 }),
+    gold, 0, 1.68, 0.42, body);
+  emblem.scale.setScalar(0.13);
+  emblem.rotation.x = 0.15;
+
+  // Cape.
+  const cape = mesh(new THREE.CylinderGeometry(0.4, 0.62, 1.3, 48, 8, true, Math.PI / 2, Math.PI),
+    std(0x101a4a, { side: THREE.DoubleSide, roughness: 0.5 }), 0, 1.45, -0.08, body);
+
+  // Head, with a black superhero mask across the eyes.
+  const headG = new THREE.Group();
+  headG.position.set(0, 2.22, 0.12);
+  body.add(headG);
+  const head = mesh(ball, fur, 0, 0, 0, headG);
+  head.scale.set(0.28, 0.3, 0.3);
+  mesh(new THREE.SphereGeometry(1.05, 48, 16, 0, Math.PI * 2, 1.12, 0.42), dark, 0, 0, 0, head);
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.SphereGeometry(0.19, 24, 16), white, sx * 0.4, 0.17, 0.86, head);
+    mesh(new THREE.SphereGeometry(0.09, 16, 12), pupil, sx * 0.4, 0.17, 1.03, head);
+    const ear = mesh(ball, fur, sx * 0.12, 0.3, -0.02, headG);
+    ear.scale.set(0.07, 0.21, 0.045);
+    ear.rotation.z = -sx * 0.25;
+    const inner = mesh(ball, furLight, 0, 0, 0.5, ear);
+    inner.scale.set(0.6, 0.8, 0.4);
+    const tie = mesh(new THREE.CapsuleGeometry(0.03, 0.22, 8, 16), dark, sx * 0.07, 0.04, -0.32, headG);
+    tie.rotation.set(-0.9, 0, sx * 0.5); // mask ties flutter at the back
+  }
+  mesh(ball, furLight, 0, -0.08, 0.24, headG).scale.set(0.16, 0.13, 0.22);
+  mesh(new THREE.SphereGeometry(0.05, 16, 12), pupil, 0, -0.02, 0.45, headG);
+
+  // Arms with black gloves.
+  for (const sx of [-1, 1]) {
+    const arm = mesh(new THREE.CapsuleGeometry(0.07, 0.34, 10, 20), suit, sx * 0.3, 1.66, 0.3, body);
+    arm.rotation.set(1.0, 0, sx * 0.2);
+    mesh(new THREE.SphereGeometry(0.09, 24, 16), dark, sx * 0.32, 1.48, 0.48, body);
+  }
+
+  // Tail.
+  const tailCurve = new THREE.CatmullRomCurve3([V(0, 1.15, -0.32), V(0, 0.7, -0.8), V(0, 0.2, -1.25), V(0, 0.08, -1.75)]);
+  mesh(taperTube(tailCurve, 48, 0.17, 0.06), suit, 0, 0, 0, body);
+
+  // Legs (pivot at the hip) with big black boots.
+  const legs = [], boots = [];
+  for (const sx of [-1, 1]) {
+    const hip = new THREE.Group();
+    hip.position.set(sx * 0.28, 1.0, -0.05);
+    body.add(hip);
+    mesh(ball, suit, 0, -0.05, 0.05, hip).scale.set(0.22, 0.38, 0.32);
+    const shin = mesh(new THREE.CapsuleGeometry(0.08, 0.5, 10, 20), suit, 0, -0.5, -0.12, hip);
+    shin.rotation.x = 0.45;
+    const boot = mesh(new THREE.CapsuleGeometry(0.1, 0.42, 12, 24), dark, 0, -0.86, 0.12, hip);
+    boot.rotation.x = Math.PI / 2;
+    legs.push(hip);
+    boots.push(boot);
+  }
+  const footTip = new THREE.Object3D();
+  footTip.position.set(0.28, -0.86, 0.42); // between the two boot tips (left hip is at x -0.28)
+  legs[0].add(footTip);
+
+  const twinkles = new Particles({ count: 60, color: 0xffffff, color2: 0xa98bff, size: 0.06 });
+
+  // Portals + the foot that comes out of the second one.
+  const galaxy = new THREE.ShaderMaterial({ uniforms: { time: { value: 0 } }, vertexShader: GALAXY_VERT, fragmentShader: GALAXY_FRAG, transparent: true, side: THREE.DoubleSide });
+  const portalA = makePortal(galaxy), portalB = makePortal(galaxy);
+  const ghost = new THREE.Group();
+  portalB.add(ghost);
+  mesh(new THREE.CapsuleGeometry(0.1, 0.42, 12, 24).rotateX(Math.PI / 2), dark, 0, 0, 0, ghost);
+  mesh(new THREE.CapsuleGeometry(0.085, 0.7, 10, 20).rotateX(Math.PI / 2), suit, 0, 0.03, -0.6, ghost);
+  const sole = mesh(new THREE.ExtrudeGeometry(starShape, { depth: 0.05, bevelEnabled: true, bevelSize: 0.08, bevelThickness: 0.05, bevelSegments: 4, curveSegments: 12 }), gold, 0, 0, 0.3, ghost);
+  sole.scale.setScalar(0.06);
+  ghost.scale.setScalar(1 / 0.55); // portal B opens to 0.55, keep the foot full size
+  ghost.visible = false;
+  const swirl = new Particles({ count: 200, color: 0xd9c2ff, color2: 0x4fc3ff, size: 0.07 });
+
+  const roo = {
+    name: 'Intergalactic Kangaroo', color: '#8fb4ff', group: g,
+    line: 'A kangaroo superhero from outer space! Kids draw me on every school book, every single day. Nobody forgets me — watch this!',
+    reaction: 'He does that to everyone. I still flinch every time.',
+    ability: (gg) => kangarooKick(roo, gg),
+    body, legs, boots, footTip, portalA, portalB, ghost, swirl, kicking: false,
+  };
+  roo.fade = makeFadable(g, REMEMBERED.kangaroo);
+
+  let tw = 0;
+  every((dt) => {
+    galaxy.uniforms.time.value = time;
+    cape.rotation.x = 0.06 + Math.sin(time * 1.7) * 0.05;
+    if (!roo.kicking) {
+      // Springy little idle hops.
+      const hop = Math.pow(Math.max(0, Math.sin(time * 2.4)), 2);
+      body.position.y = hop * 0.22;
+      for (const l of legs) { l.rotation.x = -hop * 0.25; l.scale.y = 1; }
+    }
+    headG.rotation.z = Math.sin(time * 0.9) * 0.06;
+    tw -= dt;
+    if (tw <= 0) {
+      tw = 0.12;
+      const a = Math.random() * 6.28;
+      twinkles.emit(V(g.position.x + Math.cos(a) * 0.9, g.position.y + 0.5 + Math.random() * 2, g.position.z + Math.sin(a) * 0.9), V(0, 0.2, 0), 1.2);
+    }
+    for (const p of [portalA, portalB]) {
+      if (!p.visible) continue;
+      p.children[0].rotation.z += dt * 2;
+      const s = p.scale.x;
+      if (Math.random() < 0.7) {
+        const a = Math.random() * 6.28;
+        const o = V(Math.cos(a) * s, Math.sin(a) * s, 0).applyQuaternion(p.quaternion).add(p.position);
+        const v = V(-Math.sin(a), Math.cos(a), 0).multiplyScalar(1.5).applyQuaternion(p.quaternion);
+        swirl.emit(o, v, 0.5);
+      }
+    }
+  });
+
+  ctx.interact.add(g, () => meet(roo), { distance: 7 });
+  return roo;
+}
+
+async function kangarooKick(k, g) {
+  const { player, camera, audio } = ctx;
+  player.enabled = false; // hold the camera still so the foot lands right in front of it
+  // Cartoon jump-kick: a little hop, lean back, legs swing forward and stretch out.
+  const pose = (lean, kick) => {
+    const ext = Math.max(0, kick / 1.5);
+    k.body.rotation.x = -lean;
+    k.body.position.y = 0.3 * ext;
+    for (const l of k.legs) { l.rotation.x = -kick; l.scale.y = 1 + 0.4 * ext; }
+  };
+  k.kicking = true;
+
+  // Turn side-on so the player can see the kick (and portal A) in profile.
+  const toP = Math.atan2(player.position.x - k.group.position.x, player.position.z - k.group.position.z);
+  const r0 = k.group.rotation.y;
+  await tween(0.4, (t) => { k.group.rotation.y = lerpAngle(r0, toP + Math.PI / 2, ease(t)); });
+  if (!alive(g)) return;
+
+  // Portal A goes exactly where his feet will be at full extension.
+  pose(0.15, 1.5);
+  k.group.updateMatrixWorld(true);
+  const tipA = V(0, 0, 0);
+  k.footTip.getWorldPosition(tipA);
+  const startPose = { lean: 0, kick: -k.legs[0].rotation.x };
+  pose(0, startPose.kick);
+  k.portalA.position.copy(tipA);
+  // Face it halfway between the kangaroo and the player so it reads as a disc, not edge-on.
+  const look = V(k.group.position.x - tipA.x, 0, k.group.position.z - tipA.z).normalize()
+    .add(V(player.position.x - tipA.x, 0, player.position.z - tipA.z).normalize()).normalize();
+  k.portalA.lookAt(tipA.x + look.x, tipA.y, tipA.z + look.z);
+  k.portalA.visible = true;
+
+  // Portal B opens right in front of the player's face.
+  const camPos = camera.position.clone();
+  const fwd = V(0, 0, -1).applyQuaternion(camera.quaternion);
+  k.portalB.position.copy(camPos).addScaledVector(fwd, 1.35);
+  k.portalB.lookAt(camPos);
+
+  audio.tone(440, 0.6, { type: 'sine', volume: 0.08 });
+  audio.tone(660, 0.6, { type: 'sine', volume: 0.05 });
+  await tween(0.5, (t) => { k.portalA.scale.setScalar(Math.max(0.0001, 0.7 * easeOut(t))); });
+  if (!alive(g)) return;
+
+  // Wind up: lean back onto the tail and tuck the legs.
+  await tween(0.45, (t) => pose(0.15 * ease(t), startPose.kick + (-0.4 - startPose.kick) * ease(t)));
+  if (!alive(g)) return;
+
+  k.portalB.visible = true;
+  tween(0.2, (t) => { k.portalB.scale.setScalar(Math.max(0.0001, 0.55 * easeOut(t))); });
+  await tween(0.17, (t) => pose(0.15, -0.4 + 1.9 * easeOut(t)));
+  if (!alive(g)) return;
+
+  // Feet vanish into portal A... and burst out of portal B.
+  for (const b of k.boots) b.visible = false;
+  audio.tone(70, 0.45, { type: 'sine', volume: 0.35 });
+  audio.noise(0.3, { volume: 0.25 });
+  k.ghost.visible = true;
+  k.ghost.position.z = -1.6;
+  await tween(0.14, (t) => { k.ghost.position.z = -1.6 + 2.65 * easeOut(t); });
+  if (!alive(g)) return;
+  await tween(0.4, (t) => {
+    const a = (1 - t) * 0.05;
+    camera.position.set(camPos.x + (Math.random() - 0.5) * a, camPos.y + (Math.random() - 0.5) * a, camPos.z + (Math.random() - 0.5) * a);
+  });
+  if (!alive(g)) return;
+  camera.position.copy(camPos);
+  await wait(0.35);
+  if (!alive(g)) return;
+
+  await tween(0.3, (t) => { k.ghost.position.z = 1.05 - 2.65 * ease(t); });
+  if (!alive(g)) return;
+  k.ghost.visible = false;
+  for (const b of k.boots) b.visible = true;
+  tween(0.35, (t) => { k.portalB.scale.setScalar(Math.max(0.0001, 0.55 * (1 - ease(t)))); });
+  await tween(0.45, (t) => pose(0.15 * (1 - ease(t)), 1.5 * (1 - ease(t))));
+  if (!alive(g)) return;
+  await tween(0.35, (t) => { k.portalA.scale.setScalar(Math.max(0.0001, 0.7 * (1 - ease(t)))); });
+  if (!alive(g)) return;
+  k.portalA.visible = k.portalB.visible = false;
+  k.kicking = false;
+  player.enabled = true;
+  await faceToward(k.group, player.position, 0.4);
+}
+
+// ===== 2. The Infernal (remembered 0.9) =====
+function crackTex() {
+  return canvasTex('cracks', (g, s) => {
+    g.fillStyle = '#160907';
+    g.fillRect(0, 0, s, s);
+    for (let i = 0; i < 260; i++) {
+      g.fillStyle = `rgba(${40 + Math.floor(rand() * 30)},${14 + Math.floor(rand() * 10)},10,0.5)`;
+      g.beginPath();
+      g.arc(rand() * s, rand() * s, 4 + rand() * 18, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.shadowColor = '#ff6a00';
+    g.shadowBlur = 14;
+    for (let c = 0; c < 30; c++) {
+      let x = rand() * s, y = rand() * s, a = rand() * 6.28;
+      g.strokeStyle = rand() < 0.5 ? '#ff7a1a' : '#ffc04d';
+      g.lineWidth = 1.5 + rand() * 3.5;
+      g.beginPath();
+      g.moveTo(x, y);
+      for (let k = 0; k < 12; k++) {
+        a += (rand() - 0.5) * 1.2;
+        x += Math.cos(a) * 14; y += Math.sin(a) * 14;
+        g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+  }, 512);
+}
+
+function buildInfernal() {
+  const g = standAt(SPOTS.infernal);
+  const cracks = crackTex();
+  cracks.wrapS = cracks.wrapT = THREE.RepeatWrapping;
+  const skin = std(0xffffff, { map: cracks, emissive: 0xffffff, emissiveMap: cracks, emissiveIntensity: 1.2, roughness: 0.85 });
+  const horn = std(0x1a0f0c, { roughness: 0.5, emissive: 0x3a0a00, emissiveIntensity: 0.6 });
+  const glow = new THREE.MeshBasicMaterial({ color: 0xffe36b });
+  const molten = new THREE.MeshBasicMaterial({ color: 0xff7a1a });
+  const ball = new THREE.SphereGeometry(1, 48, 32);
+
+  const body = new THREE.Group();
+  g.add(body);
+  const prof = [[0.0, 1.2], [0.32, 1.24], [0.38, 1.5], [0.5, 1.9], [0.64, 2.25], [0.58, 2.5], [0.3, 2.7], [0.0, 2.74]]
+    .map(([r, y]) => new THREE.Vector2(r, y));
+  mesh(new THREE.LatheGeometry(new THREE.SplineCurve(prof).getPoints(40), 64), skin, 0, 0, 0, body).scale.z = 0.72;
+  mesh(ball, skin, 0, 1.25, 0, body).scale.set(0.36, 0.25, 0.28);
+  mesh(ball, molten, 0, 2.05, 0.3, body).scale.set(0.09, 0.09, 0.05); // molten heart
+
+  for (const sx of [-1, 1]) {
+    mesh(new THREE.CapsuleGeometry(0.17, 0.75, 12, 24), skin, sx * 0.22, 0.62, 0, body);
+    mesh(ball, horn, sx * 0.22, 0.1, 0.08, body).scale.set(0.18, 0.12, 0.28);
+  }
+
+  const arms = [], hands = [];
+  for (const sx of [-1, 1]) {
+    mesh(ball, skin, sx * 0.64, 2.38, 0, body).scale.setScalar(0.26);
+    const arm = new THREE.Group();
+    arm.position.set(sx * 0.66, 2.38, 0);
+    arm.rotation.z = sx * 0.22;
+    body.add(arm);
+    mesh(new THREE.CapsuleGeometry(0.13, 0.5, 12, 24), skin, 0, -0.38, 0, arm);
+    mesh(new THREE.CapsuleGeometry(0.12, 0.48, 12, 24), skin, 0, -0.95, 0.04, arm);
+    mesh(ball, skin, 0, -1.32, 0.07, arm).scale.setScalar(0.15);
+    for (let c = -1; c <= 1; c++) {
+      const claw = mesh(new THREE.ConeGeometry(0.035, 0.16, 16), horn, c * 0.06, -1.48, 0.1, arm);
+      claw.rotation.x = Math.PI + 0.3;
+    }
+    const hand = new THREE.Object3D();
+    hand.position.set(0, -1.38, 0.12);
+    arm.add(hand);
+    arms.push(arm);
+    hands.push(hand);
+  }
+
+  const headG = new THREE.Group();
+  headG.position.set(0, 2.98, 0.05);
+  body.add(headG);
+  mesh(ball, skin, 0, 0, 0, headG).scale.set(0.3, 0.32, 0.3);
+  mesh(ball, skin, 0, -0.18, 0.1, headG).scale.set(0.23, 0.14, 0.21);
+  for (const sx of [-1, 1]) {
+    const eye = mesh(ball, glow, sx * 0.11, 0.04, 0.26, headG);
+    eye.scale.set(0.06, 0.035, 0.03);
+    eye.rotation.z = sx * -0.35;
+    const hc = new THREE.CatmullRomCurve3([V(sx * 0.18, 0.15, 0), V(sx * 0.4, 0.35, -0.05), V(sx * 0.47, 0.66, -0.2), V(sx * 0.38, 0.92, -0.36)]);
+    mesh(taperTube(hc, 40, 0.085, 0.012), horn, 0, 0, 0, headG);
+  }
+  const mouth = mesh(new THREE.CapsuleGeometry(0.025, 0.14, 8, 16), molten, 0, -0.18, 0.3, headG);
+  mouth.rotation.z = Math.PI / 2;
+
+  const light = new THREE.PointLight(0xff7a2a, 6, 12, 1.5);
+  light.position.set(0, 2.2, 0.8);
+  g.add(light);
+
+  const flames = new Particles({ count: 300, color: 0xffd04a, color2: 0xff3000, size: 0.2, grow: 1.2, gravity: -2.5, drag: 0.8 });
+  const fire = new Particles({ count: 1400, color: 0xffb030, color2: 0xc81800, size: 0.3, grow: 2, gravity: -0.6, drag: 0.35 });
+  const core = new Particles({ count: 600, color: 0xfff0b0, color2: 0xff7a00, size: 0.2, grow: 0.8, additive: true, drag: 0.2 });
+  const smoke = new Particles({ count: 200, color: 0x4a3a36, color2: 0x9a8f8c, size: 0.5, grow: 3, gravity: -1.2, drag: 0.5 });
+
+  const inf = {
+    name: 'The Infernal', color: '#ff7a2f', group: g,
+    line: 'Every child who\'s scared of the dark keeps my fire burning. Fear is the one thing they never forget.',
+    reaction: 'I\'m supposed to put that out. I... really can\'t.',
+    ability: (gg) => infernalFire(inf, gg),
+    body, arms, hands, skin, light, fire, core, smoke, flames, charging: 0,
+  };
+  inf.fade = makeFadable(g, REMEMBERED.infernal);
+
+  const hp = V(0, 0, 0);
+  every((dt) => {
+    const b = 1 + Math.sin(time * 1.6) * 0.02;
+    body.scale.set(b, 1, b);
+    skin.emissiveIntensity = 1.1 + Math.sin(time * 2.1) * 0.3 + inf.charging * 1.2;
+    light.intensity = 5 + Math.sin(time * 13) * 0.8 + Math.sin(time * 7.3) * 0.6 + inf.charging * 10;
+    // Flames licking off his head and shoulders.
+    for (let i = 0; i < 3; i++) {
+      const a = Math.random() * 6.28;
+      const src = Math.random() < 0.5 ? V(Math.cos(a) * 0.2, 3.15, Math.sin(a) * 0.2) : V((Math.random() < 0.5 ? -1 : 1) * 0.64, 2.55, (Math.random() - 0.5) * 0.3);
+      src.applyMatrix4(body.matrixWorld);
+      flames.emit(src, V((Math.random() - 0.5) * 0.4, 1 + Math.random(), (Math.random() - 0.5) * 0.4), 0.6 + Math.random() * 0.4, 0.15 + Math.random() * 0.12);
+    }
+    if (inf.charging > 0) {
+      // Fire gathering in his hands.
+      for (const h of hands) {
+        h.getWorldPosition(hp);
+        const a = Math.random() * 6.28, e = Math.random() * 3.14;
+        const off = V(Math.cos(a) * Math.sin(e), Math.cos(e), Math.sin(a) * Math.sin(e)).multiplyScalar(0.9);
+        flames.emit(V(hp.x + off.x, hp.y + off.y, hp.z + off.z), off.multiplyScalar(-2.2), 0.4, 0.14);
+      }
+    }
+  });
+
+  ctx.interact.add(g, () => meet(inf), { distance: 7 });
+  return inf;
+}
+
+async function infernalFire(f, g) {
+  const { audio } = ctx;
+  const r0 = f.arms.map((a) => ({ x: a.rotation.x, z: a.rotation.z }));
+  // Raise both hands forward and gather the fire.
+  f.charging = 0;
+  await tween(0.8, (t) => {
+    const e = ease(t);
+    f.arms.forEach((a, i) => { a.rotation.x = r0[i].x - 1.45 * e; a.rotation.z = r0[i].z * (1 - e) - (i ? 0.18 : -0.18) * e; });
+    f.charging = e;
+  });
+  if (!alive(g)) return;
+  audio.tone(55, 0.9, { type: 'sawtooth', volume: 0.1 });
+  await wait(0.5);
+  if (!alive(g)) return;
+
+  // A roaring stream of fire, swept across in front of the player (stopping just short of them).
+  audio.noise(3.2, { volume: 0.35 });
+  audio.tone(48, 3, { type: 'sawtooth', volume: 0.16 });
+  audio.tone(73, 3, { type: 'sawtooth', volume: 0.1 });
+  const a = V(0, 0, 0), b = V(0, 0, 0), o = V(0, 0, 0), d = V(0, 0, 0);
+  const yaw0 = f.group.rotation.y;
+  let acc = 0, accS = 0;
+  await tween(2.8, (t, dt) => {
+    f.hands[0].getWorldPosition(a);
+    f.hands[1].getWorldPosition(b);
+    o.addVectors(a, b).multiplyScalar(0.5);
+    const yaw = yaw0 - 1.35 + 0.95 * ease(t), pitch = 0.04;
+    d.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch));
+    acc += dt * 480;
+    while (acc > 1) {
+      acc--;
+      const sp = 11 + Math.random() * 4, j = 1.8;
+      f.fire.emit(o, V(d.x * sp + (Math.random() - 0.5) * j, d.y * sp + (Math.random() - 0.5) * j, d.z * sp + (Math.random() - 0.5) * j),
+        0.8 + Math.random() * 0.4, 0.3 + Math.random() * 0.22);
+      if (Math.random() < 0.5) {
+        const cs = 14 + Math.random() * 3;
+        f.core.emit(o, V(d.x * cs + (Math.random() - 0.5) * 0.6, d.y * cs + (Math.random() - 0.5) * 0.6, d.z * cs + (Math.random() - 0.5) * 0.6), 0.45);
+      }
+    }
+    accS += dt * 45;
+    while (accS > 1) {
+      accS--;
+      f.smoke.emit(V(o.x + d.x * 8, o.y + d.y * 8 + 0.5, o.z + d.z * 8), V(d.x * 6, d.y * 6 + 1, d.z * 6), 1.6, 0.4);
+    }
+    f.charging = 1 + Math.sin(t * 40) * 0.2;
+  });
+  if (!alive(g)) return;
+  await tween(0.7, (t) => {
+    const e = ease(t);
+    f.arms.forEach((arm, i) => { arm.rotation.x = r0[i].x - 1.45 * (1 - e); arm.rotation.z = r0[i].z * e - (i ? 0.18 : -0.18) * (1 - e); });
+    f.charging = 1 - e;
+  });
+  f.charging = 0;
+}
+
+// ===== 3. The Kite (remembered 0.85) =====
+function kiteSailGeo() {
+  const S = 32, T = 48;
+  const pos = [], col = [], idx = [];
+  const A = new THREE.Color(0xff5fa2), B = new THREE.Color(0xffd23f), C = new THREE.Color(0x5ad1ff), D = new THREE.Color(0x9b7bff);
+  const top = new THREE.Color(), bot = new THREE.Color(), c = new THREE.Color();
+  for (let j = 0; j <= T; j++) {
+    const t = j / T, y = 1.2 - t * 2.7;
+    const hw = y >= 0 ? 0.85 * (1 - y / 1.2) : 0.85 * (1 + y / 1.5);
+    for (let i = 0; i <= S; i++) {
+      const s = -1 + (2 * i) / S;
+      pos.push(s * hw, y, 0.2 * (1 - s * s) * Math.sin(Math.PI * t)); // billowed in the wind
+      const wx = smooth(-0.08, 0.08, s), wy = smooth(-0.1, 0.1, y);
+      top.copy(A).lerp(B, wx);
+      bot.copy(C).lerp(D, wx);
+      c.copy(bot).lerp(top, wy);
+      col.push(c.r, c.g, c.b);
+      if (i < S && j < T) {
+        const a = j * (S + 1) + i;
+        idx.push(a, a + S + 1, a + 1, a + 1, a + S + 1, a + S + 2);
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+const TORNADO_FRAG = `
+  uniform float time; uniform float fade; uniform float speed; varying vec2 vUv;
+  void main() {
+    float u = vUv.x, v = vUv.y;
+    float s1 = sin((u * 9.0 + v * 4.0 - time * speed) * 6.2831);
+    float s2 = sin((u * 16.0 - v * 6.0 - time * speed * 1.7) * 6.2831);
+    float streak = smoothstep(0.1, 1.0, s1 * 0.6 + s2 * 0.4);
+    float edge = smoothstep(0.0, 0.1, v) * smoothstep(1.0, 0.7, v);
+    vec3 col = mix(vec3(0.78, 0.76, 0.92), vec3(1.0), streak);
+    gl_FragColor = vec4(col, (0.16 + 0.55 * streak) * edge * fade);
+    #include <colorspace_fragment>
+  }`;
+
+function buildTornado() {
+  const group = new THREE.Group();
+  group.visible = false;
+  ctx.scene.add(group);
+  const spin = new THREE.Group();
+  group.add(spin);
+  const prof = [];
+  for (let i = 0; i <= 40; i++) {
+    const y = (i / 40) * 11;
+    prof.push(new THREE.Vector2(0.5 + 0.09 * Math.pow(y, 1.6), y));
+  }
+  const geo = new THREE.LatheGeometry(prof, 96);
+  const mats = [3.0, 4.5].map((speed) => new THREE.ShaderMaterial({
+    uniforms: { time: { value: 0 }, fade: { value: 1 }, speed: { value: speed } },
+    vertexShader: GALAXY_VERT, fragmentShader: TORNADO_FRAG,
+    transparent: true, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  mesh(geo, mats[0], 0, 0, 0, spin);
+  mesh(geo, mats[1], 0, 0, 0, spin).scale.set(0.8, 1, 0.8);
+  const debris = new Particles({ count: 400, color: 0xffffff, color2: 0xffa6d6, size: 0.12, drag: 0.3 });
+  const dust = new Particles({ count: 200, color: 0xf3e2b8, color2: 0xffffff, size: 0.35, grow: 2, drag: 1 });
+  return {
+    group, spin, mats, debris, dust,
+    step(dt, strength) {
+      spin.rotation.y += dt * 7;
+      spin.rotation.z = Math.sin(time * 1.7) * 0.06;
+      for (const m of mats) { m.uniforms.time.value = time; m.uniforms.fade.value = strength; }
+      const p = group.position;
+      for (let i = 0; i < 6 * strength; i++) {
+        const a = Math.random() * 6.28, h = Math.random() * 8, r = 0.5 + 0.09 * Math.pow(h, 1.6);
+        debris.emit(V(p.x + Math.cos(a) * r, p.y + h, p.z + Math.sin(a) * r), V(-Math.sin(a) * 6, 1.5, Math.cos(a) * 6), 0.7);
+      }
+      for (let i = 0; i < 2 * strength; i++) {
+        const a = Math.random() * 6.28;
+        dust.emit(V(p.x + Math.cos(a) * 0.8, p.y + 0.1, p.z + Math.sin(a) * 0.8), V(Math.cos(a) * 3, 0.4, Math.sin(a) * 3), 0.9);
+      }
+    },
+  };
+}
+
+function buildKite() {
+  const g = standAt(SPOTS.kite);
   mesh(new THREE.CylinderGeometry(0.05, 0.06, 0.6, 16), std(0x8a6a4a), 0, 0.3, 0, g);
 
   const kite = new THREE.Group();
-  kite.position.set(0, 3.6, 0.6);
+  kite.position.set(0, 3.8, 0.6);
   g.add(kite);
-  const corners = [new THREE.Vector2(0, 1.2), new THREE.Vector2(0.85, 0), new THREE.Vector2(0, -1.5), new THREE.Vector2(-0.85, 0)];
-  const cols = [0xff5fa2, 0xffd23f, 0x5ad1ff, 0x9b7bff];
-  for (let i = 0; i < 4; i++) {
-    const shape = new THREE.Shape([new THREE.Vector2(0, 0), corners[i], corners[(i + 1) % 4]]);
-    mesh(new THREE.ShapeGeometry(shape), std(cols[i], { side: THREE.DoubleSide, emissive: cols[i], emissiveIntensity: 0.35 }), 0, 0, 0, kite);
-  }
+  mesh(kiteSailGeo(), new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.45, emissive: 0x332233 }), 0, 0, 0, kite);
   const spar = std(0xfff6e0);
-  mesh(new THREE.CylinderGeometry(0.025, 0.025, 2.7, 12), spar, 0, -0.15, -0.03, kite);
-  mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.7, 12), spar, 0, 0, -0.03, kite).rotation.z = Math.PI / 2;
+  mesh(new THREE.CylinderGeometry(0.025, 0.025, 2.7, 12), spar, 0, -0.15, -0.02, kite);
+  mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.7, 12), spar, 0, 0, -0.02, kite).rotation.z = Math.PI / 2;
   const white = new THREE.MeshBasicMaterial({ color: 0xffffff }), black = new THREE.MeshBasicMaterial({ color: 0x111111 });
   for (const sx of [-1, 1]) {
-    mesh(new THREE.SphereGeometry(0.13, 24, 16), white, sx * 0.24, 0.3, 0.03, kite).scale.z = 0.4;
-    mesh(new THREE.SphereGeometry(0.065, 16, 12), black, sx * 0.24, 0.29, 0.08, kite).scale.z = 0.4;
+    mesh(new THREE.SphereGeometry(0.13, 24, 16), white, sx * 0.24, 0.3, 0.2, kite).scale.z = 0.4;
+    mesh(new THREE.SphereGeometry(0.065, 16, 12), black, sx * 0.24, 0.29, 0.25, kite).scale.z = 0.4;
   }
-  const smile = mesh(new THREE.TorusGeometry(0.2, 0.03, 12, 32, Math.PI), black, 0, 0, 0.04, kite);
+  const smile = mesh(new THREE.TorusGeometry(0.2, 0.03, 12, 32, Math.PI), black, 0, 0, 0.21, kite);
   smile.rotation.z = Math.PI;
 
-  // Tail with bows, and the string down to the stake.
-  const bowShape = new THREE.Shape([new THREE.Vector2(0, 0), new THREE.Vector2(0.2, 0.12), new THREE.Vector2(0.2, -0.12)]);
-  const bowGeo = new THREE.ShapeGeometry(bowShape);
-  const bows = [];
-  for (let i = 0; i < 5; i++) {
+  // Long flowing ribbon tail (rebuilt every frame) with soft bows.
+  const N = 80, L = 7.5;
+  const tpos = new Float32Array((N + 1) * 2 * 3), tcol = [], tidx = [];
+  const c0 = new THREE.Color(0xff4f9a), c1 = new THREE.Color(0xffd23f), c2 = new THREE.Color(0x4fd2ff), cc = new THREE.Color();
+  for (let i = 0; i <= N; i++) {
+    const t = i / N;
+    cc.copy(t < 0.5 ? c0 : c1).lerp(t < 0.5 ? c1 : c2, t < 0.5 ? t * 2 : t * 2 - 1);
+    tcol.push(cc.r, cc.g, cc.b, cc.r, cc.g, cc.b);
+    if (i < N) { const a = i * 2; tidx.push(a, a + 2, a + 1, a + 1, a + 2, a + 3); }
+  }
+  const tgeo = new THREE.BufferGeometry();
+  tgeo.setAttribute('position', new THREE.BufferAttribute(tpos, 3));
+  tgeo.setAttribute('color', new THREE.Float32BufferAttribute(tcol, 3));
+  tgeo.setIndex(tidx);
+  mesh(tgeo, new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide, roughness: 0.4 }), 0, 0, 0, kite).frustumCulled = false;
+  const bowMat = std(0xff7ac4, { roughness: 0.4 });
+  const bows = new Map(); // ribbon index -> bow
+  for (let i = 0; i < 6; i++) {
     const b = new THREE.Group();
     kite.add(b);
-    const m = std(cols[i % 4], { side: THREE.DoubleSide, emissive: cols[i % 4], emissiveIntensity: 0.3 });
-    mesh(bowGeo, m, 0, 0, 0, b);
-    mesh(bowGeo, m, 0, 0, 0, b).rotation.z = Math.PI;
-    bows.push(b);
+    for (const sx of [-1, 1]) {
+      const lobe = mesh(new THREE.SphereGeometry(1, 24, 16), bowMat, sx * 0.1, 0, 0, b);
+      lobe.scale.set(0.11, 0.065, 0.025);
+      lobe.rotation.z = sx * 0.3;
+    }
+    mesh(new THREE.SphereGeometry(0.03, 12, 8), bowMat, 0, 0, 0, b);
+    bows.set(Math.round(((i + 1) / 7) * N), b);
   }
   const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff });
-  const tailLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(new Array(6).fill(0).map(() => V(0, 0, 0))), lineMat);
-  kite.add(tailLine);
   const string = new THREE.Line(new THREE.BufferGeometry().setFromPoints([V(0, 0.6, 0), V(0, 0, 0)]), lineMat);
   g.add(string);
 
-  const wind = new Particles({ count: 400, color: 0xffffff, color2: 0xcfe6ff, size: 0.14, grow: 0.6 });
-
-  const skye = {
+  const tornado = buildTornado();
+  const kt = {
     name: 'Skye', color: '#ff7ac4', group: g,
-    line: 'Every windy day, a child somewhere runs with a kite. That\'s what keeps me flying!',
-    reaction: 'I used to be able to do that with water. Sort of.',
-    ability: (gg) => skyeGust(skye, gg),
-    kite, wind, loop: 0,
+    line: 'Nearly every child has run with a kite on a windy day. My tail\'s a little shorter than it used to be... but I can still fly.',
+    reaction: 'Hey! Wait for me! ...These legs weren\'t made for running.',
+    ability: (gg) => kiteTornado(kt, gg),
+    kite, tornado, loop: 0,
   };
-  skye.fade = makeFadable(g, REMEMBERED.kite);
+  kt.fade = makeFadable(g, REMEMBERED.kite);
 
+  const p = V(0, 0, 0);
   every(() => {
-    kite.position.y = 3.6 + Math.sin(time * 1.3) * 0.3;
+    kite.position.y = 3.8 + Math.sin(time * 1.3) * 0.3;
     kite.position.x = Math.sin(time * 0.7) * 0.4;
-    kite.rotation.z = Math.sin(time * 0.9) * 0.15 + skye.loop;
+    kite.rotation.z = Math.sin(time * 0.9) * 0.15 + kt.loop;
     kite.rotation.x = -0.2 + Math.sin(time * 1.1) * 0.08;
-    const tp = tailLine.geometry.attributes.position;
-    for (let i = 0; i < 6; i++) {
-      const x = Math.sin(time * 3 - i * 0.9) * 0.12 * i, y = -1.5 - i * 0.45, z = -i * 0.12;
-      tp.setXYZ(i, x, y, z);
-      if (i > 0) { bows[i - 1].position.set(x, y, z); bows[i - 1].rotation.y = Math.sin(time * 4 + i) * 0.6; }
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      p.set(Math.sin(time * 2.6 - t * 7) * 0.7 * t, -1.5 - t * L * 0.72, -t * L * 0.5 + Math.sin(time * 1.9 - t * 5) * 0.4 * t);
+      const tw = Math.sin(time * 2.2 - t * 6) * 0.9, hw = 0.1 * (1 - t * 0.4);
+      tpos.set([p.x - Math.cos(tw) * hw, p.y, p.z - Math.sin(tw) * hw, p.x + Math.cos(tw) * hw, p.y, p.z + Math.sin(tw) * hw], i * 6);
+      const bow = bows.get(i);
+      if (bow) { bow.position.copy(p); bow.rotation.y = tw; }
     }
-    tp.needsUpdate = true;
+    tgeo.attributes.position.needsUpdate = true;
+    tgeo.computeVertexNormals();
     const sp = string.geometry.attributes.position;
     sp.setXYZ(1, kite.position.x, kite.position.y - 0.4, kite.position.z);
     sp.needsUpdate = true;
   });
 
-  ctx.interact.add(g, () => meet(skye), { distance: 7 });
-  return skye;
+  ctx.interact.add(g, () => meet(kt), { distance: 8 });
+  return kt;
 }
 
-async function skyeGust(s, g) {
-  const { player, audio } = ctx;
-  const from = V(0, 0, 0);
-  audio.noise(2.5, { volume: 0.3 });
-  audio.tone(180, 1.5, { type: 'sine', volume: 0.08 });
-  let acc = 0, t = 0;
-  // A strong gust lifts the player, holds them a moment, then sets them down gently.
-  await tween(3.6, (k, dt) => {
-    t += dt;
-    s.loop = ease(Math.min(1, t / 1.2)) * Math.PI * 2; // the kite does a loop-the-loop
-    s.kite.getWorldPosition(from);
-    const pp = player.position;
-    acc += dt * 160;
-    while (acc > 1) {
-      acc--;
-      if (Math.random() < 0.5) {
-        const o = V(from.x + (Math.random() - 0.5) * 3, from.y + (Math.random() - 0.5) * 2, from.z + (Math.random() - 0.5) * 3);
-        const d = V(pp.x - o.x, pp.y + 1 - o.y, pp.z - o.z).normalize().multiplyScalar(12);
-        s.wind.emit(o, V(d.x, d.y + 1, d.z), 1.1);
-      } else {
-        const a = Math.random() * Math.PI * 2, r = 1 + Math.random() * 0.6;
-        s.wind.emit(V(pp.x + Math.cos(a) * r, pp.y + Math.random() * 0.6, pp.z + Math.sin(a) * r), V(-Math.sin(a) * 4, 5, Math.cos(a) * 4), 0.8);
-      }
-    }
-    const hold = 25 * dt; // cancels one frame of gravity (player.js GRAVITY)
-    if (t < 0.7) player.velocity.y = 5 + hold;
-    else if (t < 1.6) player.velocity.y = hold;
-    else if (!player.grounded) player.velocity.y = -2.8 + hold;
+async function kiteTornado(k, g) {
+  const { player, camera, audio } = ctx;
+  const tor = k.tornado;
+  const P0 = player.position.clone();
+
+  // Landing spot: the other side of the map, nudged until it's clear of props.
+  const away = Math.hypot(P0.x, P0.z) > 3 ? Math.atan2(-P0.z, -P0.x) : Math.PI;
+  let P1 = null;
+  for (let i = 0; i < 30 && !P1; i++) {
+    const a = away + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 0.1;
+    const x = Math.cos(a) * 36, z = Math.sin(a) * 36;
+    if (!props.some(([px, pz, pr]) => (px - x) ** 2 + (pz - z) ** 2 < (pr + 2) ** 2)) P1 = V(x, 0, z);
+  }
+  if (!P1) P1 = V(Math.cos(away) * 36, 0, Math.sin(away) * 36);
+
+  // The kite whips round and a tornado spins up in front of the player.
+  const fwd = V(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
+  const T0 = P0.clone().addScaledVector(fwd, 5);
+  tor.group.visible = true;
+  audio.noise(1.5, { volume: 0.25 });
+  audio.tone(110, 6, { type: 'sine', volume: 0.12 });
+  await tween(1.3, (t, dt) => {
+    k.loop = ease(t) * Math.PI * 2;
+    const e = ease(t);
+    tor.group.position.set(T0.x + (P0.x - T0.x) * e, 0, T0.z + (P0.z - T0.z) * e);
+    tor.group.position.y = H(tor.group.position.x, tor.group.position.z);
+    tor.group.scale.setScalar(Math.max(0.0001, easeOut(t)));
+    tor.step(dt, t);
   });
-  s.loop = 0;
+  if (!alive(g)) return;
+  k.loop = 0;
+
+  // Picked up, spun round and carried across Quirkland.
+  player.enabled = false;
+  const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+  let ang = 0, yaw = player.yaw, pitch = player.pitch;
+  audio.noise(2.5, { volume: 0.3 });
+  setTimeout(() => alive(g) && audio.noise(2.5, { volume: 0.25 }), 2000);
+  await tween(4.6, (t, dt) => {
+    const e = ease(t);
+    const cx = P0.x + (P1.x - P0.x) * e, cz = P0.z + (P1.z - P0.z) * e;
+    tor.group.position.set(cx, H(cx, cz), cz);
+    tor.step(dt, 1);
+    const spinRate = 2 + 2.5 * Math.sin(Math.PI * t);
+    ang += dt * spinRate;
+    const R = 0.4 + 1.1 * smooth(0, 0.12, t) * (1 - smooth(0.85, 1, t));
+    const lift = 9 * Math.pow(Math.sin(Math.PI * t), 0.8);
+    const x = cx + Math.cos(ang) * R, z = cz + Math.sin(ang) * R;
+    player.position.set(x, H(x, z) + lift, z);
+    yaw += dt * spinRate * 0.7;
+    pitch += (-0.15 + Math.sin(time * 2.5) * 0.12 - pitch) * Math.min(1, dt * 3);
+    camera.position.set(x, player.position.y + 1.6, z);
+    camera.quaternion.setFromEuler(euler.set(pitch, yaw, 0));
+  });
+  if (!alive(g)) return;
+
+  // Set down gently on the far side.
+  player.position.y = H(player.position.x, player.position.z);
+  player.velocity.set(0, 0, 0);
+  player.yaw = yaw;
+  player.pitch = pitch;
+  player.enabled = true;
+
+  // The tornado wanders on and blows itself out.
+  const dir = V(P1.x - P0.x, 0, P1.z - P0.z).normalize();
+  await tween(1.4, (t, dt) => {
+    tor.group.position.addScaledVector(dir, dt * 4);
+    tor.group.position.y = H(tor.group.position.x, tor.group.position.z);
+    tor.group.scale.set(Math.max(0.0001, 1 - ease(t) * 0.6), Math.max(0.0001, 1 - ease(t)), Math.max(0.0001, 1 - ease(t) * 0.6));
+    tor.step(dt, 1 - t);
+  });
+  tor.group.visible = false;
 }
 
 // ---------- scene ----------
@@ -996,13 +1607,15 @@ export default {
   init(c) {
     ctx = c;
     gen++;
-    tasks = []; systems = []; fadables = []; pathPts = []; pathEnds = []; props = [[0, 0, 6]];
+    tasks = []; systems = []; fadables = []; pathPts = []; pathEnds = []; props = [[0, 0, 6], ...Object.values(SPOTS).map(([x, z]) => [x, z, 5])];
     time = 0; state = 'intro'; busy = false;
     rand = mulberry32(7);
     pxScale = (window.innerHeight * Math.min(window.devicePixelRatio, 2)) / (2 * Math.tan(THREE.MathUtils.degToRad(ctx.camera.fov / 2)));
 
     buildWorld();
-    buildSkye();
+    buildKangaroo();
+    buildInfernal();
+    buildKite();
     hydrant = buildHydrant();
 
     // TEMP exit until the masked figure (§9) is built: end of the north path.
