@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Loop</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Rubik+Bubbles&display=swap" rel="stylesheet">
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: system-ui, sans-serif; }
+    #game { display: block; width: 100vw; height: 100vh; }
+    #crosshair {
+      position: fixed; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
+      border-radius: 50%; background: #fff; box-shadow: 0 0 2px #000; pointer-events: none; z-index: 10;
+    }
+    #start {
+      position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 12px;
+      background: rgba(0, 0, 0, 0.6); color: #fff; cursor: pointer; user-select: none; text-align: center;
+    }
+    #start[hidden] { display: none; }
+    #start h1 { margin: 0; font-size: 64px; letter-spacing: 0.2em; }
+    #start p { margin: 0; opacity: 0.8; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="crosshair"></div>
+  <div id="start">
+    <h1>LOOP</h1>
+    <p>Click to play</p>
+    <p>WASD move · Mouse look · SPACE jump · E interact</p>
+  </div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
