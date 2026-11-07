@@ -67,6 +67,7 @@ async function goTo(name) {
     audio.stopAll();
     camera.fov = FOV;
     camera.updateProjectionMatrix();
+    camera.up.set(0, 1, 0);
 
     currentScene = new THREE.Scene();
     const ctx = { scene: currentScene, camera, player, interact, dialogue, effects, audio, goTo };
@@ -117,6 +118,7 @@ if (params.has('debug')) {
 
 // ---------- game loop ----------
 const clock = new THREE.Clock();
+const crosshair = document.getElementById('crosshair');
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
   try {
@@ -126,6 +128,7 @@ renderer.setAnimationLoop(() => {
   } catch (e) {
     console.error(e);
   }
+  crosshair.style.visibility = player.enabled ? 'visible' : 'hidden'; // hidden during cutscenes
   renderer.render(currentScene, camera);
 });
 
