@@ -16,6 +16,11 @@ No attribution is required; we credit the authors anyway. Downloaded at 1K resol
 | `textures/rusty_metal_02/` | Rusty Metal 02 | Rob Tuytel | https://polyhaven.com/a/rusty_metal_02 | CC0 | Weathered cast-iron street lamps, fire hydrant |
 | `textures/rusted_shutter/` | Rusted Shutter | Dimitrios Savva | https://polyhaven.com/a/rusted_shutter | CC0 | Garage shutters |
 | `textures/wood_peeling_paint_weathered/` | Wood Peeling Paint Weathered | Rob Tuytel (processing), Dimitrios Savva (photography) | https://polyhaven.com/a/wood_peeling_paint_weathered | CC0 | Wooden doors and window shutters |
+| `hdri/white_studio_05_1k.hdr` | White Studio 05 | Grzegorz Wronkowski | https://polyhaven.com/a/white_studio_05 | CC0 | Neutral white image-based lighting / reflections (conveyor hall) |
+| `textures/interior_tiles/` | Interior Tiles | Charlotte Baglioni | https://polyhaven.com/a/interior_tiles | CC0 | Polished hall floor (normal / roughness / AO under a white base) |
+| `textures/white_plaster_02/` | White Plaster 02 | Rob Tuytel | https://polyhaven.com/a/white_plaster_02 | CC0 | Subtle wear on the enamelled wall panels (normal / roughness) |
+| `textures/rubberized_track/` | Rubberized Track | Charlotte Baglioni | https://polyhaven.com/a/rubberized_track | CC0 | Conveyor belt rubber (normal / roughness / AO, scrolling) |
+| `textures/metal_plate/` | Metal Plate | Rob Tuytel | https://polyhaven.com/a/metal_plate | CC0 | Diamond-plate floor strips and motor base (conveyor) |
 
 Each texture folder contains `color.jpg`, `normal.jpg` (OpenGL convention), `roughness.jpg` and `ao.jpg`,
 the layout expected by `ctx.assets.textures(folder)`.
