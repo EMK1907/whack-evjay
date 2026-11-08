@@ -17,7 +17,12 @@ const NEXT = 'ending';
 const HYDRANT = 'Fire Hydrant';
 const HYDRANT_COLOR = '#ff9d92';
 const FOLLOW_DIST = 2.2;
-const PLAY_R = 50;              // walkable radius (invisible wall)
+const PLAY_R = 34;              // compact walkable meadow radius
+// The final clearing sits apart from the meadow, up a narrow valley to the north, behind a candy hedge.
+const CLEAR_C = [0, -48], CLEAR_R = 8;
+const CORRIDOR_W = 1.7;         // half-width of the valley path
+const HEDGE_Z = -PLAY_R - 1;    // where the hedge blocks the valley
+const NEEDED = 5;               // encounters needed before the hedge opens
 const CEIL_R = 95, CEIL_H = 34; // ceiling dome (ellipsoid) radius / height
 const MOUTH_SIZE = 5.5;
 
@@ -26,9 +31,9 @@ const REMEMBERED = { hydrant: 0.2, kangaroo: 1.0, infernal: 0.9, kite: 0.85, roc
 
 // Where the inhabitants live (kept clear of candy and trees).
 const SPOTS = {
-  kangaroo: [29, 12], infernal: [-15, -26], kite: [20, -16],
-  rock: [-25, 11], water: [-3, 31], tongue: [-34, -7],
-  masked: [-8, -40], // end of the north path
+  kangaroo: [21, 9], infernal: [-13, -18], kite: [15, -14],
+  rock: [-19, 9], water: [-1, 23], tongue: [-25, -6],
+  masked: [CLEAR_C[0], CLEAR_C[1] - 2], // the remote final clearing
 };
 
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
@@ -61,6 +66,11 @@ let pathEnds = [];
 let props = [];       // occupied [x, z, radius]
 let shake = 0;        // camera shake amount (decays)
 let masked = null;
+let hedge = null;
+let met = new Set();  // inhabitants whose demo the player has watched
+let unlocked = false; // hedge open → the clearing is reachable
+let progressEl = null;
+let onDebugKey = null;
 
 const alive = (g) => ctx !== null && g === gen;
 
@@ -80,6 +90,7 @@ function tween(sec, fn) {
   });
 }
 const wait = (sec) => tween(sec, () => {});
+const nextFrame = () => new Promise((resolve) => tasks.push((dt) => { resolve(dt); return false; }));
 const ease = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 const easeOut = (t) => 1 - Math.pow(1 - t, 3);
 const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
@@ -114,7 +125,7 @@ function mesh(geo, mat, x = 0, y = 0, z = 0, parent = ctx.scene) {
 function collide(obj) { ctx.player.colliders.push(obj); return obj; }
 
 // ---------- terrain height ----------
-const HILLS = [[20, -16, 4.5, 7], [-24, 10, 5, 9], [8, 27, 3.5, 6.5], [-15, -27, 4.5, 8], [31, 13, 3.2, 7], [-33, -8, 3.8, 7]];
+const HILLS = [[15, -14, 3.6, 5.5], [-19, 9, 3.8, 6.5], [7, 20, 2.8, 5], [-13, -18, 3.4, 6], [21, 9, 2.8, 5.5], [-25, -6, 3, 5.5]];
 
 /** Ground height at (x, z): flat meadow at the arrival point, rolling hills, rising to big rounded hills at the rim. */
 function H(x, z) {
@@ -127,7 +138,12 @@ function H(x, z) {
     const dx = x - hx, dz = z - hz;
     h += a * Math.exp(-(dx * dx + dz * dz) / (s * s));
   }
-  return h + Math.pow(smooth(44, 76, r), 1.4) * 36;
+  // Big rounded rim hills close the meadow in — except for the valley up to the clearing.
+  const [cx, cz] = CLEAR_C;
+  const dc = Math.hypot(x - cx, z - cz);
+  const valley = Math.max(1 - smooth(CLEAR_R + 1, CLEAR_R + 6, dc),
+    (1 - smooth(CORRIDOR_W + 1, CORRIDOR_W + 5, Math.abs(x))) * smooth(-10, -PLAY_R + 2, z) * (z > cz ? 1 : 0));
+  return h + Math.pow(smooth(PLAY_R + 1, PLAY_R + 26, r), 1.4) * 34 * (1 - valley) + valley * 0.6;
 }
 
 // ---------- fading: remembered 0..1 → transparency + desaturation ----------
@@ -260,7 +276,7 @@ function buildWorld() {
   key.shadow.mapSize.set(2048, 2048);
   key.shadow.bias = -0.0004;
   key.shadow.normalBias = 0.04;
-  Object.assign(key.shadow.camera, { left: -58, right: 58, top: 58, bottom: -58, near: 1, far: 160 });
+  Object.assign(key.shadow.camera, { left: -44, right: 44, top: 60, bottom: -44, near: 1, far: 160 });
   key.shadow.camera.updateProjectionMatrix();
   scene.add(key);
   // Soft glow from the middle of the world so the inward-facing rim hills stay bright.
@@ -274,16 +290,15 @@ function buildWorld() {
   buildCandy();
   buildTrees();
 
-  // Invisible boundary wall (the rim hills rise behind it).
-  const wall = mesh(new THREE.CylinderGeometry(PLAY_R, PLAY_R, 40, 64, 1, true),
-    new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }), 0, 10, 0);
-  wall.visible = false;
-  collide(wall);
+  buildClearing();
+  buildHedge();
+  // The edge of the walkable area is enforced in confinePlayer() (meadow + valley + clearing).
 }
 
+const _grey = new THREE.Color();
 function buildTerrain() {
   // Split into chunks so the player's raycasts only test nearby triangles.
-  const SIZE = 160, CHUNKS = 8, SEG = 32, cs = SIZE / CHUNKS;
+  const SIZE = 136, CHUNKS = 8, SEG = 32, cs = SIZE / CHUNKS;
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.92 });
   const cA = new THREE.Color(0x63dd48), cB = new THREE.Color(0xa6ec4c), cC = new THREE.Color(0x3fd27a);
   const sun = new THREE.Color(0xd8f56a), pastel = new THREE.Color(), col = new THREE.Color();
@@ -307,9 +322,13 @@ function buildTerrain() {
         const v = 0.5 + 0.5 * Math.sin(x * 0.21 + Math.cos(z * 0.17) * 2) * Math.cos(z * 0.19 - x * 0.05);
         col.copy(cA).lerp(cB, v * 0.6);
         col.lerp(cC, smooth(0.3, 1, Math.sin(x * 0.07 - z * 0.11) * 0.5 + 0.5) * 0.35);
-        col.lerp(sun, smooth(2.5, 5, h) * (1 - smooth(46, 60, r)) * 0.4);
+        col.lerp(sun, smooth(2.5, 5, h) * (1 - smooth(PLAY_R - 2, PLAY_R + 10, r)) * 0.4);
         pastel.setHSL(((Math.atan2(z, x) / (Math.PI * 2)) + 1) % 1, 0.85, 0.8);
-        col.lerp(pastel, smooth(46, 68, r) * 0.85);
+        col.lerp(pastel, smooth(PLAY_R - 2, PLAY_R + 20, r) * 0.85);
+        // The clearing and its valley: drained of colour — nothing here was dreamed up by a child.
+        const dcl = Math.hypot(x - CLEAR_C[0], z - CLEAR_C[1]);
+        const drain = Math.max(1 - smooth(CLEAR_R - 2, CLEAR_R + 5, dcl), (1 - smooth(CORRIDOR_W, CORRIDOR_W + 4, Math.abs(x))) * smooth(-PLAY_R + 1, -PLAY_R - 6, z) * 0.7);
+        col.lerp(_grey.setRGB(0.36, 0.38, 0.34), drain * 0.8);
         colors.set([col.r, col.g, col.b], i * 3);
       }
       geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
@@ -460,11 +479,14 @@ function buildPaths() {
   const starts = [1.5 * Math.PI, 0.25, 1.2, 2.3, 3.4, 4.4];
   starts.forEach((a0, k) => {
     const pts = [];
-    for (let r = 7; r <= 46; r += 4) {
-      const a = a0 + Math.sin(r * 0.13 + k * 2.1) * 0.32;
+    const end = k === 0 ? PLAY_R - 1 : PLAY_R - 5; // the north path runs right up to the hedge
+    for (let r = 7; r <= end; r += 3) {
+      const wob = k === 0 ? 1 - smooth(PLAY_R - 12, PLAY_R - 4, r) : 1; // straightens into the valley
+      const a = a0 + Math.sin(r * 0.17 + k * 2.1) * 0.3 * wob;
       pts.push([Math.cos(a) * r, Math.sin(a) * r]);
     }
-    wobblyPath(pts, { width: 2, seed: k * 3 + 2 });
+    if (k === 0) for (let z = -PLAY_R - 4; z >= CLEAR_C[1] + 2; z -= 4) pts.push([0, z]); // valley → clearing
+    wobblyPath(pts, { width: 2, seed: k * 3 + 2, wobble: k === 0 ? 0.15 : 0.25 });
     pathEnds.push(pts[pts.length - 1]);
   });
 }
@@ -603,15 +625,15 @@ function sweet(s) {
 
 function buildCandy() {
   const kinds = [
-    [lollipop, 14, () => 0.8 + rand() * 1.6, 0.9],
-    [candyCane, 12, () => 0.7 + rand() * 1.1, 0.9],
-    [gumdrop, 22, () => 0.6 + rand() * 2.2, 1.1],
-    [sweet, 16, () => 0.8 + rand() * 1.2, 0.8],
+    [lollipop, 10, () => 0.8 + rand() * 1.4, 0.9],
+    [candyCane, 8, () => 0.7 + rand() * 1.0, 0.9],
+    [gumdrop, 14, () => 0.6 + rand() * 1.9, 1.1],
+    [sweet, 10, () => 0.8 + rand() * 1.1, 0.8],
   ];
   for (const [make, count, size, rad] of kinds) {
     for (let i = 0; i < count; i++) {
       const s = size();
-      const spot = freeSpot(9, 47, rad * s);
+      const spot = freeSpot(8, PLAY_R - 3, rad * s);
       if (!spot) continue;
       placeOnGround(make(s), spot[0], spot[1]);
     }
@@ -622,8 +644,8 @@ function buildTrees() {
   // Cotton-candy trees with striped candy trunks, and round bushes.
   const canopyCols = [0xffa6d6, 0xa8d8ff, 0xd3b4ff, 0xb5f5d0, 0xffd6a0];
   const ball = new THREE.SphereGeometry(1, 40, 24);
-  for (let i = 0; i < 14; i++) {
-    const spot = freeSpot(12, 46, 2.4, 3);
+  for (let i = 0; i < 9; i++) {
+    const spot = freeSpot(10, PLAY_R - 3, 2.4, 3);
     if (!spot) continue;
     const g = new THREE.Group();
     const h = 3 + rand() * 2.5, bend = rand() * Math.PI * 2;
@@ -641,8 +663,8 @@ function buildTrees() {
     placeOnGround(g, spot[0], spot[1], 0.1);
   }
   const bushMat = [0x4fd35a, 0x7fe35a].map((c) => std(c, { roughness: 0.9 }));
-  for (let i = 0; i < 26; i++) {
-    const spot = freeSpot(9, 47, 1, 1.2);
+  for (let i = 0; i < 14; i++) {
+    const spot = freeSpot(8, PLAY_R - 3, 1, 1.2);
     if (!spot) continue;
     const g = new THREE.Group();
     for (let k = 0; k < 3; k++) {
@@ -652,6 +674,108 @@ function buildTrees() {
     g.rotation.y = rand() * 6.28;
     placeOnGround(g, spot[0], spot[1], 0.05);
   }
+}
+
+// ---------- the remote clearing, the candy hedge and progression ----------
+function buildClearing() {
+  // Forgotten candy at the edge of the clearing: colourless, drooping, half sunk into the ground.
+  const grey = std(0x8a8a86, { roughness: 0.9 });
+  const stick = std(0x6e6e6a, { roughness: 0.9 });
+  const disc = new THREE.CylinderGeometry(0.5, 0.5, 0.14, 48);
+  const stem = new THREE.CylinderGeometry(0.04, 0.04, 1.4, 16);
+  for (let i = 0; i < 7; i++) {
+    const a = (i / 7) * Math.PI * 2 + 0.4;
+    if (Math.abs(Math.sin(a) - 1) < 0.25) continue; // keep the valley mouth clear
+    const x = CLEAR_C[0] + Math.cos(a) * (CLEAR_R - 1), z = CLEAR_C[1] + Math.sin(a) * (CLEAR_R - 1);
+    const g = new THREE.Group();
+    mesh(stem, stick, 0, 0.7, 0, g);
+    const d = mesh(disc, grey, 0, 1.4, 0, g);
+    d.rotation.x = Math.PI / 2;
+    g.rotation.set((rand() - 0.5) * 0.9, rand() * 6.28, (rand() - 0.5) * 0.9);
+    placeOnGround(g, x, z, 0.3);
+  }
+}
+
+function buildHedge() {
+  // A thick wall of cotton-candy puffs on a striped candy-cane frame, plugging the valley.
+  const half = CORRIDOR_W + 3.2;
+  const puffs = [];
+  for (let row = 0; row < 3; row++) {
+    for (let x = -half; x <= half; x += 0.85) {
+      const jx = x + (rand() - 0.5) * 0.3, z = HEDGE_Z + (row - 1) * 0.55 + (rand() - 0.5) * 0.2;
+      const r = 0.7 + rand() * 0.35;
+      const y = H(jx, z) + 0.5 + row * 0.1 + rand() * 0.2;
+      puffs.push({ x: jx, y, z, r, top: false });
+      if (rand() < 0.85) puffs.push({ x: jx + 0.2, y: y + 1.05 + rand() * 0.3, z, r: r * 0.85, top: true });
+    }
+  }
+  const cols = [0xffa6d6, 0xffffff, 0xffc4e6, 0xd8b8ff];
+  const inst = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 32, 20), std(0xffffff, { roughness: 1 }), puffs.length);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = V(0, 0, 0), c = new THREE.Color();
+  puffs.forEach((p, i) => {
+    inst.setMatrixAt(i, m4.compose(V(p.x, p.y, p.z), q, sc.setScalar(p.r)));
+    inst.setColorAt(i, c.setHex(cols[i % cols.length]));
+  });
+  ctx.scene.add(inst);
+  // Candy-cane posts poking out of it.
+  const posts = [];
+  for (let k = -2; k <= 2; k++) {
+    const x = k * (half / 2.3);
+    const post = mesh(new THREE.CylinderGeometry(0.1, 0.1, 2.8, 24),
+      std(0xffffff, { map: stripeTex('#ffffff', '#ff2d4a', 5), roughness: 0.3 }), x, H(x, HEDGE_Z) + 1.3, HEDGE_Z);
+    posts.push(post);
+  }
+  const blocker = mesh(new THREE.BoxGeometry(half * 2, 6, 2.2), new THREE.MeshBasicMaterial(), 0, H(0, HEDGE_Z) + 3, HEDGE_Z);
+  blocker.visible = false;
+  collide(blocker);
+  hedge = { inst, puffs, posts, blocker, open: false };
+}
+
+function openHedge() {
+  if (!hedge || hedge.open) return;
+  hedge.open = true;
+  unlocked = true;
+  updateProgress();
+  ctx.player.colliders = ctx.player.colliders.filter((o) => o !== hedge.blocker);
+  const { audio } = ctx;
+  [523, 659, 784, 1047, 1319].forEach((f, i) => setTimeout(() => ctx && audio.tone(f, 0.5, { type: 'triangle', volume: 0.06 }), i * 120));
+  audio.noise(0.8, { volume: 0.06 });
+  const sparkle = new Particles({ count: 200, color: 0xffffff, color2: 0xffa6d6, size: 0.12, gravity: -0.6, drag: 0.8 });
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = V(0, 0, 0), pos = V(0, 0, 0);
+  // The hedge parts down the middle like curtains and shrinks back into the hillsides.
+  tween(2.2, (t) => {
+    const e = ease(t);
+    hedge.puffs.forEach((p, i) => {
+      const side = p.x === 0 ? 1 : Math.sign(p.x);
+      pos.set(p.x + side * e * 5, p.y - e * 0.6, p.z);
+      hedge.inst.setMatrixAt(i, m4.compose(pos, q, sc.setScalar(Math.max(0.0001, p.r * (1 - e * 0.95)))));
+      if (Math.random() < 0.03) sparkle.emit(pos, V((Math.random() - 0.5) * 2, 1 + Math.random() * 2, (Math.random() - 0.5) * 2), 1.2);
+    });
+    hedge.inst.instanceMatrix.needsUpdate = true;
+    hedge.posts.forEach((post) => { post.scale.y = Math.max(0.0001, 1 - e); post.position.y -= 0.002; });
+  }).then(() => { if (hedge) { hedge.inst.visible = false; hedge.posts.forEach((p) => { p.visible = false; }); } });
+}
+
+function updateProgress() {
+  if (!progressEl) return;
+  progressEl.style.opacity = state === 'free' ? '1' : '0';
+  progressEl.textContent = unlocked ? 'The candy hedge to the north has opened' : `Inhabitants met: ${Math.min(met.size, NEEDED)} / ${NEEDED}`;
+  if (unlocked) setTimeout(() => { if (progressEl) progressEl.style.opacity = '0'; }, 5000);
+}
+
+// Keep the player inside the meadow, the valley and the clearing (the rim hills are too steep anyway).
+const _lastOk = V(0, 0, 0);
+function allowed(x, z) {
+  if (Math.hypot(x, z) <= PLAY_R) return true;
+  if (Math.abs(x) <= CORRIDOR_W && z <= -PLAY_R + 3 && z >= CLEAR_C[1]) return true;
+  return Math.hypot(x - CLEAR_C[0], z - CLEAR_C[1]) <= CLEAR_R;
+}
+function confinePlayer() {
+  const p = ctx.player.position;
+  if (!ctx.player.enabled || allowed(p.x, p.z)) { _lastOk.copy(p); return; }
+  if (allowed(p.x, _lastOk.z)) p.z = _lastOk.z;
+  else if (allowed(_lastOk.x, p.z)) p.x = _lastOk.x;
+  else { p.x = _lastOk.x; p.z = _lastOk.z; }
 }
 
 // ---------- the Fire Hydrant ----------
@@ -834,6 +958,7 @@ async function intro(g) {
   player.enabled = true;
   hydrant.mode = 'follow';
   state = 'free';
+  updateProgress();
 }
 
 // ---------- the hydrant's ability ----------
@@ -903,6 +1028,11 @@ async function meet(who) {
   if (!alive(g)) return;
   ctx.interact.enabled = true;
   busy = false;
+  if (!met.has(who.name)) {
+    met.add(who.name);
+    updateProgress();
+    if (met.size >= NEEDED) openHedge();
+  }
 }
 
 function faceToward(obj, p, sec) {
@@ -1564,10 +1694,10 @@ async function kiteTornado(k, g) {
   let P1 = null;
   for (let i = 0; i < 30 && !P1; i++) {
     const a = away + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * 0.1;
-    const x = Math.cos(a) * 36, z = Math.sin(a) * 36;
+    const x = Math.cos(a) * (PLAY_R - 9), z = Math.sin(a) * (PLAY_R - 9);
     if (!props.some(([px, pz, pr]) => (px - x) ** 2 + (pz - z) ** 2 < (pr + 2) ** 2)) P1 = V(x, 0, z);
   }
-  if (!P1) P1 = V(Math.cos(away) * 36, 0, Math.sin(away) * 36);
+  if (!P1) P1 = V(Math.cos(away) * (PLAY_R - 9), 0, Math.sin(away) * (PLAY_R - 9));
 
   // The kite whips round and a tornado spins up in front of the player.
   const fwd = V(-Math.sin(player.yaw), 0, -Math.cos(player.yaw));
@@ -2155,10 +2285,12 @@ async function tongueStretch(tg, g) {
 function buildMaskedFigure() {
   const [x, z] = SPOTS.masked;
   const g = standAt(SPOTS.masked);
-  const black = std(0x070707, { roughness: 0.75, metalness: 0.1 });
+  // Entirely black: a matte, light-swallowing body; the mask is black too, but glossy, so it reads as a
+  // separate object you can see him lift off.
+  const black = std(0x020202, { roughness: 0.95, metalness: 0 });
   const voidMat = new THREE.MeshBasicMaterial({ color: 0x000000 }); // pure darkness, no shading
-  const maskMat = std(0xebe4d6, { roughness: 0.35, side: THREE.DoubleSide, emissive: 0x6e6a62, emissiveIntensity: 0.6 });
-  const rubyMat = std(0xd0002a, { roughness: 0.12, metalness: 0.3, emissive: 0x3a0006, emissiveIntensity: 1, flatShading: true });
+  const maskMat = std(0x070707, { roughness: 0.12, metalness: 0, side: THREE.DoubleSide });
+  const rubyMat = std(0xd0002a, { roughness: 0.12, metalness: 0.3, emissive: 0x3a0006, emissiveIntensity: 1, flatShading: true, side: THREE.DoubleSide });
 
   const body = new THREE.Group();
   g.add(body);
@@ -2226,8 +2358,8 @@ function buildMaskedFigure() {
   let wispT = 0;
   every((dt) => {
     // Barely moves. Just the slow sway — and the head that always turns to follow you.
-    body.rotation.z = Math.sin(time * 0.4) * 0.012;
     if (!mf.revealing) {
+      body.rotation.z = Math.sin(time * 0.4) * 0.012;
       const p = ctx.player.position;
       const want = THREE.MathUtils.clamp(lerpAngle(0, Math.atan2(p.x - g.position.x, p.z - g.position.z) - g.rotation.y, 1), -1.1, 1.1);
       mf.headYaw += (want - mf.headYaw) * Math.min(1, dt * 0.8);
@@ -2252,7 +2384,7 @@ function buildMaskedFigure() {
 const _frustum = new THREE.Frustum(), _pm = new THREE.Matrix4(), _ray = new THREE.Raycaster();
 let sightT = 0;
 function checkFirstSight(mf, dt) {
-  if (mf.seen || state !== 'free') return;
+  if (mf.seen || state !== 'free' || !unlocked) return;
   sightT -= dt;
   if (sightT > 0) return;
   sightT = 0.25;
@@ -2286,8 +2418,58 @@ async function sayUnfamiliar(mf) {
   return mf.lineDone;
 }
 
+// Numerically pose a 2-bone arm so the hand reaches `target` (world). Cheap: done once per pose.
+function solveArm(arm, target) {
+  const sh = arm.shoulder, el = arm.elbow, hp = V(0, 0, 0);
+  const save = [sh.rotation.x, sh.rotation.z, el.rotation.x];
+  const lim = [[-3.3, 0.6], [-1.4, 1.4], [-2.9, 0]];
+  const x = save.slice();
+  const cost = () => {
+    sh.rotation.x = x[0]; sh.rotation.z = x[1]; el.rotation.x = x[2];
+    sh.updateMatrixWorld(true);
+    return arm.hand.getWorldPosition(hp).distanceToSquared(target);
+  };
+  let best = cost();
+  for (let step = 0.5; step > 0.002; step *= 0.6) {
+    let improved = true;
+    while (improved) {
+      improved = false;
+      for (let i = 0; i < 3; i++) {
+        for (const d of [step, -step]) {
+          const old = x[i];
+          x[i] = THREE.MathUtils.clamp(old + d, lim[i][0], lim[i][1]);
+          const c = cost();
+          if (c < best - 1e-7) { best = c; improved = true; } else x[i] = old;
+        }
+      }
+    }
+  }
+  const out = x.slice();
+  [sh.rotation.x, sh.rotation.z, el.rotation.x] = save;
+  sh.updateMatrixWorld(true);
+  return out;
+}
+
+function poseArm(arm, from, to, e) {
+  arm.shoulder.rotation.x = from[0] + (to[0] - from[0]) * e;
+  arm.shoulder.rotation.z = from[1] + (to[1] - from[1]) * e;
+  arm.elbow.rotation.x = from[2] + (to[2] - from[2]) * e;
+}
+
+// True when the ruby covers all four corners of the screen.
+const _corner = new THREE.Raycaster(), _ndc = new THREE.Vector2();
+function rubyFillsScreen(ruby) {
+  const cam = ctx.camera;
+  cam.updateMatrixWorld();
+  for (const [x, y] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+    _corner.setFromCamera(_ndc.set(x * 0.999, y * 0.999), cam);
+    if (!_corner.intersectObject(ruby, false).length) return false;
+  }
+  return true;
+}
+
 async function revealMaskedFigure(mf) {
-  if (busy || state !== 'free' || mf.revealing) return;
+  if (busy || state !== 'free' || mf.revealing || !unlocked) return;
   const g = gen;
   const { player, camera, audio } = ctx;
   if (!mf.seen) { mf.seen = true; sayUnfamiliar(mf); }
@@ -2296,69 +2478,96 @@ async function revealMaskedFigure(mf) {
   await mf.lineDone;
   if (!alive(g)) return;
 
-  // The camera locks.
+  // ---- The camera locks, and you look up at him. ----
   player.enabled = false;
   mf.revealing = true;
+  mf.body.rotation.z = 0;
   const camPos = camera.position.clone();
-  const camQ = camera.quaternion.clone();
+  const q0 = camera.quaternion.clone(), q1 = new THREE.Quaternion(), m4 = new THREE.Matrix4();
+  const rubyPos = () => { mf.group.updateMatrixWorld(true); return mf.ruby.getWorldPosition(V(0, 0, 0)); };
+  const lookQ = (from, at) => q1.setFromRotationMatrix(m4.lookAt(from, at, camera.up));
 
-  // He looks straight at you...
-  const h0 = mf.head.rotation.y, z0 = mf.head.rotation.z;
-  const target = THREE.MathUtils.clamp(lerpAngle(0, Math.atan2(camPos.x - mf.group.position.x, camPos.z - mf.group.position.z) - mf.group.rotation.y, 1), -1.2, 1.2);
-  audio.tone(55, 6, { type: 'sine', volume: 0.15 });
-  audio.tone(58, 6, { type: 'sine', volume: 0.1 });
-  await tween(1.4, (t) => {
+  // His head turns down to face you while your view tilts up to his face (centred on where the ruby is).
+  const h0 = { y: mf.head.rotation.y, z: mf.head.rotation.z, x: mf.head.rotation.x };
+  const hp = mf.head.getWorldPosition(V(0, 0, 0));
+  const yawT = THREE.MathUtils.clamp(lerpAngle(0, Math.atan2(camPos.x - mf.group.position.x, camPos.z - mf.group.position.z) - mf.group.rotation.y, 1), -1.2, 1.2);
+  const pitchT = Math.atan2(hp.y - camPos.y, Math.hypot(hp.x - camPos.x, hp.z - camPos.z));
+  audio.tone(55, 7, { type: 'sine', volume: 0.15 });
+  audio.tone(58, 7, { type: 'sine', volume: 0.1 });
+  await tween(2.2, (t) => {
     const e = ease(t);
-    mf.head.rotation.y = h0 + (target - h0) * e;
-    mf.head.rotation.z = z0 * (1 - e);
-    // tilt the face down toward the player
-    mf.head.rotation.x = 0.25 * e;
+    mf.head.rotation.set(h0.x + (pitchT - h0.x) * e, h0.y + (yawT - h0.y) * e, h0.z * (1 - e));
+    camera.quaternion.copy(q0).slerp(lookQ(camPos, rubyPos()), e);
   });
   if (!alive(g)) return;
+  await wait(0.5);
+  if (!alive(g)) return;
 
-  // ...slowly raises one long hand to the mask...
+  // ---- He slowly lays one long hand on top of his head... ----
   const arm = mf.arms[0];
-  await tween(2.6, (t) => {
-    const e = ease(t);
-    arm.shoulder.rotation.x = -1.61 * e;
-    arm.shoulder.rotation.z = -0.06 + 0.12 * e;
-    arm.elbow.rotation.x = -2.39 * e;
-    arm.fingers.forEach((f) => { f.rotation.x = 0.6 * e; });
-  });
-  if (!alive(g)) return;
-  await wait(0.6);
-  if (!alive(g)) return;
-
-  // ...and lifts it away. Nothing underneath but darkness, and a ruby.
-  arm.hand.attach(mf.mask);
-  audio.noise(0.4, { volume: 0.05 });
+  const crown = (dx, dy, dz) => mf.head.localToWorld(V(dx, dy, dz));
+  mf.group.updateMatrixWorld(true);
+  const rest = [arm.shoulder.rotation.x, arm.shoulder.rotation.z, arm.elbow.rotation.x];
+  const onHead = solveArm(arm, crown(0, 0.48, -0.04));
   await tween(2.8, (t) => {
     const e = ease(t);
-    arm.shoulder.rotation.x = -1.61 + 1.0 * e;
-    arm.shoulder.rotation.z = 0.06 - 0.55 * e;
-    arm.elbow.rotation.x = -2.39 + 1.9 * e;
+    poseArm(arm, rest, onHead, e);
+    arm.fingers.forEach((f) => { f.rotation.x = 1.1 * e; }); // fingers curl down over the crown
+    camera.quaternion.copy(lookQ(camPos, rubyPos()));
+  });
+  if (!alive(g)) return;
+  await wait(0.8);
+  if (!alive(g)) return;
+
+  // ---- ...and lifts the black mask up and off. Nothing beneath but darkness, and a ruby. ----
+  arm.hand.attach(mf.mask);
+  audio.noise(0.4, { volume: 0.05 });
+  const lifted = solveArm(arm, crown(-0.55, 1.1, 0.35));
+  await tween(2.4, (t) => {
+    poseArm(arm, onHead, lifted, ease(t));
+    camera.quaternion.copy(lookQ(camPos, rubyPos()));
+  });
+  if (!alive(g)) return;
+  const lowered = [0.15, -0.38, -0.35];
+  await tween(1.8, (t) => {
+    poseArm(arm, lifted, lowered, ease(t));
+    arm.fingers.forEach((f) => { f.rotation.x = 1.1 - 0.5 * ease(t); });
+    camera.quaternion.copy(lookQ(camPos, rubyPos()));
   });
   if (!alive(g)) return;
   await wait(1.0);
   if (!alive(g)) return;
 
-  // Zoom smoothly into the ruby until it fills the screen.
-  const rubyPos = V(0, 0, 0);
-  mf.ruby.getWorldPosition(rubyPos);
+  // ---- The ruby stays dead centre while the camera closes in, until it covers all four corners. ----
   const facing = V(0, 1, 0).transformDirection(mf.ruby.matrixWorld); // the gem's table faces out of his forehead
-  const end = rubyPos.clone().addScaledVector(facing, 0.13);
-  const look = V(0, 0, 0), fwd0 = V(0, 0, -1).applyQuaternion(camQ).multiplyScalar(5).add(camPos);
   const fov0 = camera.fov;
-  await tween(3.6, (t) => {
+  const at = (d) => rubyPos().addScaledVector(facing, d);
+  const start = camPos.clone();
+  let covered = false;
+  for (let t = 0; t < 1 && !covered;) {
+    t = Math.min(1, t + (await nextFrame()) / 4.2);
+    if (!alive(g)) return;
     const e = ease(t);
-    camera.position.lerpVectors(camPos, end, e);
-    look.lerpVectors(fwd0, rubyPos, Math.min(1, ease(Math.min(1, t * 2.5))));
-    camera.lookAt(look);
-    camera.fov = fov0 + (25 - fov0) * e;
+    camera.position.lerpVectors(start, at(0.12), e);
+    camera.fov = fov0 + (12 - fov0) * e;
     camera.updateProjectionMatrix();
-  });
-  if (!alive(g)) return;
-  await wait(0.3);
+    camera.lookAt(rubyPos());
+    covered = t > 0.5 && rubyFillsScreen(mf.ruby);
+  }
+  // Very wide screens may need a little more: keep creeping in (and narrowing) until every corner is ruby.
+  let d = camera.position.distanceTo(rubyPos());
+  for (let i = 0; i < 120 && !covered; i++) {
+    await nextFrame();
+    if (!alive(g)) return;
+    d = Math.max(0.075, d * 0.985);
+    camera.position.copy(at(d));
+    camera.fov = Math.max(5, camera.fov * 0.99);
+    camera.updateProjectionMatrix();
+    camera.lookAt(rubyPos());
+    covered = rubyFillsScreen(mf.ruby);
+  }
+  mf.coveredAtEnd = covered;
+  await wait(0.5);
   if (!alive(g)) return;
   ctx.goTo(NEXT);
 }
@@ -2383,6 +2592,7 @@ export default {
     gen++;
     tasks = []; systems = []; fadables = []; pathPts = []; pathEnds = []; props = [[0, 0, 6], ...Object.values(SPOTS).map(([x, z]) => [x, z, 5])];
     time = 0; state = 'intro'; busy = false; shake = 0; sightT = 0;
+    met = new Set(); unlocked = false; hedge = null;
     rand = mulberry32(7);
     pxScale = (window.innerHeight * Math.min(window.devicePixelRatio, 2)) / (2 * Math.tan(THREE.MathUtils.degToRad(ctx.camera.fov / 2)));
 
@@ -2396,6 +2606,18 @@ export default {
     hydrant = buildHydrant();
 
     masked = buildMaskedFigure();
+
+    progressEl = document.createElement('div');
+    Object.assign(progressEl.style, {
+      position: 'fixed', top: '18px', left: '50%', transform: 'translateX(-50%)', padding: '6px 14px', borderRadius: '999px',
+      background: 'rgba(0,0,0,0.45)', color: '#fff', font: '600 15px system-ui, sans-serif', pointerEvents: 'none',
+      zIndex: '20', opacity: '0', transition: 'opacity 0.6s',
+    });
+    document.body.appendChild(progressEl);
+    if (new URLSearchParams(location.search).has('debug')) {
+      onDebugKey = (e) => { if (e.code === 'KeyU' && ctx) openHedge(); }; // ?debug: U unlocks the final route
+      window.addEventListener('keydown', onDebugKey);
+    }
     setupShadows();
 
     // Tuned for the ACES pipeline: the bright pastels need exposure below 1 to keep their colour;
@@ -2415,6 +2637,7 @@ export default {
     for (const s of systems) s.update(dt);
     updateHydrant(dt);
     updateFades();
+    confinePlayer();
     checkFirstSight(masked, dt);
     // Camera shake rides on top of wherever the player put the camera this frame.
     if (shake > 0) {
@@ -2431,6 +2654,11 @@ export default {
     texCache.clear();
     hydrant = null;
     masked = null;
+    hedge = null;
+    progressEl?.remove();
+    progressEl = null;
+    if (onDebugKey) window.removeEventListener('keydown', onDebugKey);
+    onDebugKey = null;
     ctx = null;
   },
 };
