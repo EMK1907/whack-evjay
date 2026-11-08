@@ -269,7 +269,8 @@ function buildWorld() {
   const { scene } = ctx;
   scene.background = new THREE.Color(0xffd6ea);
   scene.fog = new THREE.Fog(0xfff0dc, 80, 200);
-  scene.add(new THREE.HemisphereLight(0xfff4e0, 0x8fdc70, 1.5));
+  const hemi = new THREE.HemisphereLight(0xfff4e0, 0x8fdc70, 1.5);
+  scene.add(hemi);
   const key = new THREE.DirectionalLight(0xfff0d8, 1.8);
   key.position.set(25, 55, 18);
   key.castShadow = true; // soft grounding shadows across the whole play area
@@ -289,6 +290,8 @@ function buildWorld() {
   buildPaths();
   buildCandy();
   buildTrees();
+  if (!new URLSearchParams(location.search).has('noflora')) buildFlora();
+  buildMood(hemi, key, fill);
 
   buildClearing();
   buildHedge();
@@ -674,6 +677,263 @@ function buildTrees() {
     g.rotation.y = rand() * 6.28;
     placeOnGround(g, spot[0], spot[1], 0.05);
   }
+}
+
+// ---------- living meadow: wind-swept grass, flowers, butterflies, pollen, and the cold drain to the clearing ----------
+const wind = { value: 0 };   // shared clock for every swaying material / drifting mote
+let mood = null;
+
+// MeshStandardMaterial that bends with the wind: the higher a vertex sits above its object's origin, the more it sways.
+// The wind blows the same world direction everywhere, with slow travelling gusts.
+function swayMaterial(opts, amt = 2.2) {
+  const m = new THREE.MeshStandardMaterial(opts);
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uWind = wind;
+    sh.vertexShader = 'uniform float uWind;\n' + sh.vertexShader.replace('#include <begin_vertex>', `
+      #include <begin_vertex>
+      #ifdef USE_INSTANCING
+        mat4 swM = modelMatrix * instanceMatrix;
+      #else
+        mat4 swM = modelMatrix;
+      #endif
+      vec3 swO = (swM * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+      vec3 swDir = normalize(transpose(mat3(swM)) * vec3(0.8, 0.0, 0.45));
+      float swGust = 0.55 + 0.45 * sin(uWind * 0.35 + swO.x * 0.045 - swO.z * 0.06);
+      float swAmt = (sin(uWind * 1.9 + swO.x * 0.42 + swO.z * 0.31) * 0.7 + sin(uWind * 3.7 + swO.x * 1.3 - swO.z * 0.9) * 0.3) * swGust;
+      float swH = max(transformed.y, 0.0);
+      transformed += swDir * swAmt * swH * swH * ${amt.toFixed(2)};`);
+  };
+  m.customProgramCacheKey = () => `quirk-sway-${amt}`;
+  return m;
+}
+
+function flatUp(geo) {
+  const n = geo.attributes.normal;
+  for (let i = 0; i < n.count; i++) n.setXYZ(i, 0, 1, 0);
+  return geo;
+}
+
+function grassTuftGeo() {
+  const pos = [], col = [], idx = [];
+  const base = new THREE.Color(0x5fd04a), tip = new THREE.Color(0xe8ff9a), c = new THREE.Color();
+  for (let b = 0; b < 4; b++) {
+    const a = b * 1.71 + 0.3, ca = Math.cos(a), sa = Math.sin(a);
+    const h = 0.22 + ((b * 0.37) % 1) * 0.16, w = 0.03, lean = 0.12 + (b % 2) * 0.1;
+    const ox = Math.cos(a + 1.2) * 0.07, oz = Math.sin(a + 1.2) * 0.07;
+    const n0 = pos.length / 3;
+    for (const [t, hw] of [[0, w], [0.55, w * 0.65], [1, 0]]) {
+      const cx = ox - sa * lean * t * t, cz = oz + ca * lean * t * t, y = t * h;
+      c.copy(base).lerp(tip, Math.pow(t, 0.8));
+      if (hw > 0) { pos.push(cx - ca * hw, y, cz - sa * hw, cx + ca * hw, y, cz + sa * hw); col.push(c.r, c.g, c.b, c.r, c.g, c.b); }
+      else { pos.push(cx, y, cz); col.push(c.r, c.g, c.b); }
+    }
+    idx.push(n0, n0 + 1, n0 + 2, n0 + 1, n0 + 3, n0 + 2, n0 + 2, n0 + 3, n0 + 4);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(new Float32Array(pos.length), 3));
+  geo.setIndex(idx);
+  return flatUp(geo); // lit like the ground it grows from — no dark backfaces
+}
+
+function tintGeo(geo, hex) {
+  const c = new THREE.Color(hex), n = geo.attributes.position.count, a = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) a.set([c.r, c.g, c.b], i * 3);
+  geo.setAttribute('color', new THREE.BufferAttribute(a, 3));
+  return geo;
+}
+
+function noFx(o) { o.traverse((m) => { if (m.isMesh) { m.userData.noCast = true; m.userData.noSSAO = true; } }); return o; }
+
+function buildFlora() {
+  const r2 = mulberry32(99); // own RNG so the rest of the world keeps its layout
+  // Path lookup grid so nothing grows through the paths.
+  const grid = new Map(), cell = 2;
+  for (const [x, z] of pathPts) {
+    const k = `${Math.floor(x / cell)},${Math.floor(z / cell)}`;
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push([x, z]);
+  }
+  const onPath = (x, z, r) => {
+    const gx = Math.floor(x / cell), gz = Math.floor(z / cell);
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+      const l = grid.get(`${gx + i},${gz + j}`);
+      if (l && l.some(([px, pz]) => (px - x) ** 2 + (pz - z) ** 2 < r * r)) return true;
+    }
+    return false;
+  };
+  const inValley = (x, z) => z < -PLAY_R + 3 && Math.abs(x) < CORRIDOR_W + 4;
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), s = V(1, 1, 1), p = V(0, 0, 0), up = V(0, 1, 0), col = new THREE.Color();
+
+  // Grass: thousands of tufts, one draw call, swaying in the vertex shader.
+  const GRASS = { low: 6000, medium: 12000, high: 16000 }[ctx.post?.quality] ?? 12000;
+  const grass = new THREE.InstancedMesh(grassTuftGeo(), swayMaterial({ vertexColors: true, roughness: 0.85, side: THREE.DoubleSide }), GRASS);
+  let n = 0;
+  for (let tries = 0; n < GRASS && tries < GRASS * 4; tries++) {
+    const a = r2() * Math.PI * 2, r = Math.sqrt(r2()) * (PLAY_R + 3);
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (inValley(x, z) || onPath(x, z, 1.75)) continue;
+    q.setFromAxisAngle(up, r2() * Math.PI * 2);
+    s.setScalar(0.7 + r2() * 0.5);
+    grass.setMatrixAt(n, m4.compose(p.set(x, H(x, z) - 0.03, z), q, s));
+    const v = r2();
+    grass.setColorAt(n, col.setRGB(0.9 + v * 0.15, 0.95 + v * 0.08, 0.85 + r2() * 0.2));
+    n++;
+  }
+  grass.count = n;
+  grass.frustumCulled = false;
+  ctx.scene.add(noFx(grass));
+
+  // Flower patches: a green stem mesh and a coloured head mesh sharing the same instance transforms.
+  const FLOWERS = 520;
+  const stemGeo = flatUp(tintGeo(new THREE.CylinderGeometry(0.012, 0.018, 0.38, 5).translate(0, 0.19, 0), 0x3caa45));
+  const parts = [];
+  for (let k = 0; k < 5; k++) {
+    const g = new THREE.SphereGeometry(0.06, 10, 6).scale(1, 0.3, 0.62).translate(0.065, 0, 0).rotateY((k / 5) * Math.PI * 2);
+    parts.push(tintGeo(g, 0xffffff));
+  }
+  parts.push(tintGeo(new THREE.SphereGeometry(0.038, 10, 6).scale(1, 0.6, 1).translate(0, 0.012, 0), 0x4a2a12));
+  const headGeo = mergeGeometries(parts).translate(0, 0.39, 0);
+  const stems = new THREE.InstancedMesh(stemGeo, swayMaterial({ vertexColors: true, roughness: 0.8 }, 0.9), FLOWERS);
+  const heads = new THREE.InstancedMesh(headGeo, swayMaterial({ vertexColors: true, roughness: 0.45 }, 0.9), FLOWERS);
+  const petals = [0xff5fa2, 0xffd23f, 0x8f7dff, 0xffffff, 0xff8a3d, 0x5ad1ff, 0xff4f6d];
+  n = 0;
+  for (let patch = 0; patch < 60 && n < FLOWERS; patch++) {
+    const a = r2() * Math.PI * 2, r = 4 + Math.sqrt(r2()) * (PLAY_R - 5);
+    const cx = Math.cos(a) * r, cz = Math.sin(a) * r;
+    const hue = petals[Math.floor(r2() * petals.length)];
+    const count = 5 + Math.floor(r2() * 9);
+    for (let i = 0; i < count && n < FLOWERS; i++) {
+      const x = cx + (r2() - 0.5) * 3, z = cz + (r2() - 0.5) * 3;
+      if (inValley(x, z) || onPath(x, z, 1.8)) continue;
+      q.setFromAxisAngle(up, r2() * Math.PI * 2);
+      s.setScalar(0.8 + r2() * 0.6);
+      m4.compose(p.set(x, H(x, z) - 0.02, z), q, s);
+      stems.setMatrixAt(n, m4); heads.setMatrixAt(n, m4);
+      heads.setColorAt(n, col.set(r2() < 0.8 ? hue : petals[Math.floor(r2() * petals.length)]));
+      n++;
+    }
+  }
+  stems.count = heads.count = n;
+  stems.frustumCulled = heads.frustumCulled = false;
+  ctx.scene.add(noFx(stems), noFx(heads));
+
+  buildButterflies(r2);
+  // Warm pollen drifting over the meadow; cold grey dust hanging in the clearing.
+  motes(r2, 650, 0, 0, PLAY_R, 0.3, 3.8, 0xfff1b0, 0xffb6dc, 0.06, 1.0);
+  motes(r2, 160, CLEAR_C[0], CLEAR_C[1], CLEAR_R + 3, 0.2, 3, 0x9fb0c4, 0x6c7684, 0.045, 0.35);
+}
+
+function buildButterflies(r2) {
+  const shape = new THREE.Shape();
+  shape.moveTo(0, 0.01);
+  shape.bezierCurveTo(0.04, 0.16, 0.2, 0.17, 0.19, 0.05);
+  shape.bezierCurveTo(0.2, -0.02, 0.16, -0.05, 0.09, -0.04);
+  shape.bezierCurveTo(0.14, -0.1, 0.07, -0.16, 0, -0.03);
+  const wingR = new THREE.ShapeGeometry(shape, 10).rotateX(-Math.PI / 2);
+  const wingL = wingR.clone().scale(-1, 1, 1);
+  const bodyGeo = new THREE.CapsuleGeometry(0.012, 0.09, 4, 8).rotateX(Math.PI / 2);
+  const bodyMat = std(0x2a1a22, { roughness: 0.6 });
+  const cols = [0xff5fa2, 0xffd23f, 0x5ad1ff, 0x8f7dff, 0xff8a3d, 0x6dff9e];
+  const flies = [];
+  for (let i = 0; i < 14; i++) {
+    const c = cols[i % cols.length];
+    const mat = std(c, { side: THREE.DoubleSide, emissive: c, emissiveIntensity: 0.35, roughness: 0.5 });
+    const g = new THREE.Group();
+    mesh(bodyGeo, bodyMat, 0, 0, 0, g);
+    const L = new THREE.Group(), R = new THREE.Group();
+    mesh(wingL, mat, 0, 0, 0, L); mesh(wingR, mat, 0, 0, 0, R);
+    g.add(L, R);
+    g.scale.setScalar(1.1 + r2() * 0.5);
+    ctx.scene.add(noFx(g));
+    const a = r2() * Math.PI * 2, r = 6 + r2() * (PLAY_R - 12);
+    flies.push({ g, L, R, ax: Math.cos(a) * r, az: Math.sin(a) * r, ph: r2() * 100, sp: 0.6 + r2() * 0.5, px: 0, pz: 0 });
+  }
+  systems.push({
+    update() {
+      for (const f of flies) {
+        const t = time * f.sp + f.ph;
+        const x = f.ax + Math.sin(t * 0.7) * 3 + Math.sin(t * 1.9) * 0.7;
+        const z = f.az + Math.cos(t * 0.53) * 3 + Math.cos(t * 1.6) * 0.7;
+        const y = H(x, z) + 0.75 + Math.sin(t * 2.3) * 0.22 + Math.sin(t * 0.4) * 0.35;
+        f.g.position.set(x, y, z);
+        const dx = x - f.px, dz = z - f.pz;
+        if (dx * dx + dz * dz > 1e-8) f.g.rotation.y = Math.atan2(dx, dz);
+        f.px = x; f.pz = z;
+        const flap = 0.25 + Math.sin(time * 21 + f.ph) * 0.95;
+        f.R.rotation.z = flap; f.L.rotation.z = -flap;
+        f.g.rotation.z = Math.sin(time * 21 + f.ph) * 0.06;
+      }
+    },
+  });
+}
+
+function motes(r2, count, cx, cz, rad, y0, y1, c1, c2, size, bright) {
+  const pos = new Float32Array(count * 3), seed = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const a = r2() * Math.PI * 2, r = Math.sqrt(r2()) * rad;
+    const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+    pos.set([x, H(x, z) + y0 + r2() * (y1 - y0), z], i * 3);
+    seed[i] = r2();
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('seed', new THREE.BufferAttribute(seed, 1));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uT: wind, scale: { value: pxScale }, size: { value: size }, c1: { value: new THREE.Color(c1) }, c2: { value: new THREE.Color(c2) }, bright: { value: bright } },
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: `
+      attribute float seed; uniform float uT; uniform float scale; uniform float size; varying float vA; varying float vS;
+      void main() {
+        float s = seed * 6.2831; vec3 p = position;
+        p.x += sin(uT * 0.23 + s) * 1.2 + sin(uT * 0.71 + s * 3.0) * 0.3;
+        p.y += sin(uT * 0.31 + s * 2.0) * 0.5;
+        p.z += cos(uT * 0.19 + s * 1.7) * 1.2;
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
+        vA = (0.5 + 0.5 * sin(uT * 1.7 + s * 5.0)) * smoothstep(45.0, 6.0, -mv.z) * smoothstep(0.3, 1.5, -mv.z);
+        vS = seed;
+        gl_PointSize = size * (0.7 + 0.6 * fract(seed * 13.7)) * scale / max(0.1, -mv.z);
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform vec3 c1; uniform vec3 c2; uniform float bright; varying float vA; varying float vS;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        if (d > 0.5) discard;
+        gl_FragColor = vec4(mix(c1, c2, vS) * bright, vA * smoothstep(0.5, 0.0, d));
+        #include <colorspace_fragment>
+      }`,
+  });
+  const pts = new THREE.Points(geo, mat);
+  pts.frustumCulled = false;
+  ctx.scene.add(pts);
+}
+
+// As the player heads up the valley the warm air drains away: colder light, grey mist closing in.
+function buildMood(hemi, key, fill) {
+  mood = {
+    hemi, key, fill, k: 0,
+    fogW: ctx.scene.fog.color.clone(), fogC: new THREE.Color(0x8e98a6),
+    hemiW: hemi.color.clone(), hemiC: new THREE.Color(0xb9c6dc),
+    keyW: key.color.clone(), keyC: new THREE.Color(0xc9d6ff),
+    I: [hemi.intensity, key.intensity, fill.intensity],
+  };
+}
+
+function updateMood(dt) {
+  if (!mood) return;
+  const c = ctx.camera.position;
+  const target = smooth(-PLAY_R + 8, CLEAR_C[1] + CLEAR_R, c.z) * (1 - smooth(10, 18, Math.abs(c.x)));
+  mood.k += (target - mood.k) * (1 - Math.exp(-dt * 2.5));
+  const k = mood.k, f = ctx.scene.fog;
+  f.color.copy(mood.fogW).lerp(mood.fogC, k);
+  f.near = 80 - 62 * k; f.far = 200 - 120 * k;
+  mood.hemi.color.copy(mood.hemiW).lerp(mood.hemiC, k);
+  mood.key.color.copy(mood.keyW).lerp(mood.keyC, k);
+  mood.hemi.intensity = mood.I[0] * (1 - 0.45 * k);
+  mood.key.intensity = mood.I[1] * (1 - 0.4 * k);
+  mood.fill.intensity = mood.I[2] * (1 - 0.6 * k);
 }
 
 // ---------- the remote clearing, the candy hedge and progression ----------
@@ -2950,6 +3210,7 @@ function setupShadows() {
   ctx.scene.traverse((o) => {
     if (!o.isMesh) return;
     for (let a = o; a; a = a.parent) if (a.userData.sky) { o.userData.noSSAO = true; return; }
+    if (o.userData.noCast) { o.castShadow = false; o.receiveShadow = true; return; }
     const mats = Array.isArray(o.material) ? o.material : [o.material];
     o.receiveShadow = mats.some((m) => m.isMeshStandardMaterial);
     // Faded (see-through) characters, particles and custom shaders don't cast.
@@ -3013,9 +3274,11 @@ export default {
     const run = tasks;
     tasks = [];
     for (const fn of run) if (fn(dt) !== false) tasks.push(fn);
+    wind.value = time;
     for (const s of systems) s.update(dt);
     updateHydrant(dt);
     updateFades();
+    updateMood(dt);
     confinePlayer();
     checkFirstSight(masked, dt);
     // Camera shake rides on top of wherever the player put the camera this frame.
@@ -3034,6 +3297,7 @@ export default {
     hydrant = null;
     masked = null;
     hedge = null;
+    mood = null;
     progressEl?.remove();
     progressEl = null;
     if (onDebugKey) window.removeEventListener('keydown', onDebugKey);
