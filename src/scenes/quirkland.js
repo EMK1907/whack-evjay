@@ -1135,16 +1135,18 @@ async function intro(g) {
   if (!alive(g)) return;
 
   const lines = INTRO.map((text) => ({ speaker: HYDRANT, color: HYDRANT_COLOR, text }));
+  // Hook animations to lines by their text, not their position, so editing the script can't break the intro.
+  const line = (start) => lines.find((l) => l.text.startsWith(start)) || {};
   lines[0].onStart = () => {
     // Startled little hop.
     audio.tone(880, 0.15, { type: 'triangle', volume: 0.1 });
     tween(0.5, (k) => { hydrant.jumpY = Math.sin(k * Math.PI) * 0.35; }).then(() => { if (alive(g)) hydrant.mode = 'stay'; });
   };
-  lines[4].onStart = () => {
+  line('But look at me').onStart = () => {
     // "See how faded I am?" — he flickers almost out.
     tween(2.2, (k) => { hydrant.fade.dip = 1 - 0.65 * Math.sin(k * Math.PI); });
   };
-  lines[7].onStart = () => {
+  line('Come on').onStart = () => {
     tween(0.4, (k) => { hydrant.jumpY = Math.sin(k * Math.PI) * 0.25; });
   };
   await dialogue.play(lines);
