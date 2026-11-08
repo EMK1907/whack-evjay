@@ -10,7 +10,7 @@ import { EYE_HEIGHT } from '../core/player.js';
 // X-ray curtains. An illuminated sign above the scanner reads BACK TO REAL WORLD. When the player
 // reaches the curtains it's their turn and the system malfunctions: the sign glitches to a red
 // DLROW, the hall turns red, any baby still on the belt turns to stare, ERROR! everywhere → cut to
-// black → goTo('fall').
+// black → goTo('inverted').
 //
 // Rendering: neutral clinical HDRI for image-based light + one shadow-casting key light whose
 // frustum follows the player along the belt; PBR texture sets from assets/ (see CREDITS.md). Static
@@ -19,7 +19,7 @@ import { EYE_HEIGHT } from '../core/player.js';
 // is one InstancedMesh shared by all babies, its instance matrices copied from the joints each frame.
 
 const NAME = 'conveyor';
-const NEXT = 'fall';
+const NEXT = 'inverted';
 
 // ---------- layout (metres; the belt carries the player towards -z) ----------
 const ROOM_W = 12, ROOM_H = 6, ROOM_BACK = 11, ROOM_FRONT = -30;
