@@ -17,13 +17,14 @@ import { Dialogue } from './core/dialogue.js';
 import { Effects } from './core/effects.js';
 import { AudioManager } from './core/audio.js';
 
+import menu from './scenes/menu.js';
 import conveyor from './scenes/conveyor.js';
 import inverted from './scenes/inverted.js';
 import quirkland from './scenes/quirkland.js';
 import ending from './scenes/ending.js';
 
 // Game flow. The conveyor exits straight into the inverted world (src/scenes/fall.js is kept but unused).
-const ORDER = [conveyor, inverted, quirkland, ending];
+const ORDER = [menu, conveyor, inverted, quirkland, ending];
 const SCENES = Object.fromEntries(ORDER.map((s) => [s.name, s]));
 // Retired scene names still requested by older scene code → where they go now.
 const REDIRECTS = { fall: 'inverted' };
@@ -403,6 +404,6 @@ renderer.setAnimationLoop(() => {
 
 // ---------- start ----------
 const requested = REDIRECTS[params.get('scene')] || params.get('scene');
-if (requested && !SCENES[requested]) console.warn(`?scene=${requested} unknown, starting at conveyor`);
+if (requested && !SCENES[requested]) console.warn(`?scene=${requested} unknown, starting at the menu`);
 effects.setFade(1);
-goTo(SCENES[requested] ? requested : 'conveyor');
+goTo(SCENES[requested] ? requested : 'menu');
