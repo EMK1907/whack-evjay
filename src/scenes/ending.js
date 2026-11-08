@@ -32,6 +32,9 @@ let gem = null, ruby = null, core = null, rays = null, glints = [], beacon = nul
 let uniforms = null, field = null, path = null, stars = null, sky = null, vortex = null;
 let ui = null, subEl = null, titleEl = null, onKey = null;
 let voiceEl = null; // the recorded voice line, if one was found
+let voiceBuf = null; // the same line decoded for Web Audio (preferred)
+let voiceRaw = null; // undecoded bytes, decoded at play time once the AudioContext exists
+let voiceSrc = null;
 let returning = false; // the hand-back to the menu has started
 
 const alive = (g) => ctx !== null && g === gen;
@@ -286,13 +289,19 @@ async function loadVoice(g) {
       el.preservesPitch = false;
       el.playbackRate = VOICE_RATE;
       voiceEl = el;
+      // Also decode it for Web Audio playback (same output path as every other game sound).
+      try { voiceRaw = await fetch(url).then((res) => res.arrayBuffer()); } catch (e) { console.warn('ending: voice fetch failed', e); }
       return;
     } catch {}
   }
 }
 
 // Play the recording; words appear in step with how far through the clip we are (weighted by word length).
-function playVoice(words, show) {
+async function playVoice(words, show) {
+  const ac0 = ctx?.audio?.ctx;
+  if (ac0 && !voiceBuf && voiceRaw) {
+    try { voiceBuf = await ac0.decodeAudioData(voiceRaw.slice(0)); } catch (e) { console.warn('ending: voice decode failed, using <audio>', e); }
+  }
   return new Promise((resolve) => {
     const el = voiceEl;
     let done = false;
@@ -302,7 +311,7 @@ function playVoice(words, show) {
     let acc = 0;
     for (const w of LINE.split(' ')) { starts.push(acc / total); acc += w.length; }
     el.onended = fin; el.onerror = fin;
-    tasks.push(() => {
+    if (!(ctx?.audio?.ctx && voiceBuf)) tasks.push(() => {
       if (done) return false;
       if (el.duration > 0) {
         const t = el.currentTime / el.duration;
@@ -312,17 +321,47 @@ function playVoice(words, show) {
       }
       return true;
     });
-    el.currentTime = 0;
-    el.play().catch(fin);
+    const ac = ctx?.audio?.ctx;
+    if (ac && voiceBuf) {
+      // Web Audio: decoded buffer → boost → limiter → speakers (bypasses the master compressor so the
+      // rumble can't duck it).
+      if (ac.state === 'suspended') ac.resume();
+      const src = ac.createBufferSource();
+      src.buffer = voiceBuf;
+      src.playbackRate.value = VOICE_RATE;
+      const boost = ac.createGain();
+      boost.gain.value = 2.6;
+      const limit = ac.createDynamicsCompressor();
+      limit.threshold.value = -6; limit.knee.value = 0; limit.ratio.value = 20;
+      limit.attack.value = 0.002; limit.release.value = 0.1;
+      src.connect(boost).connect(limit).connect(ac.destination);
+      const t0 = ac.currentTime, dur = voiceBuf.duration / VOICE_RATE;
+      src.onended = fin;
+      voiceSrc = src;
+      tasks.push(() => {
+        if (done) return false;
+        const t = Math.min(1, (ac.currentTime - t0) / dur);
+        let i = -1;
+        while (i + 1 < starts.length && starts[i + 1] * 0.92 <= t) i++;
+        show(i);
+        return true;
+      });
+      src.start();
+    } else {
+      el.volume = 1;
+      el.currentTime = 0;
+      el.play().catch(fin);
+    }
     setTimeout(fin, 15000);
   });
 }
 
 function rumble(audio) {
-  audio.tone(31, 7, { type: 'sine', volume: 0.3 });
-  audio.tone(32.7, 7, { type: 'sine', volume: 0.22 });
-  audio.tone(46, 5, { type: 'triangle', volume: 0.06 });
-  audio.noise(3.5, { volume: 0.035 });
+  // Kept low: it sits under the voice line and must never mask it.
+  audio.tone(31, 7, { type: 'sine', volume: 0.12 });
+  audio.tone(32.7, 7, { type: 'sine', volume: 0.09 });
+  audio.tone(46, 5, { type: 'triangle', volume: 0.025 });
+  audio.noise(3.5, { volume: 0.012 });
 }
 
 // ---------- the sequence ----------
@@ -499,6 +538,8 @@ export default {
     try { window.speechSynthesis?.cancel(); } catch {}
     if (voiceEl) { voiceEl.pause(); voiceEl.onended = voiceEl.onerror = null; }
     voiceEl = null;
+    if (voiceSrc) { try { voiceSrc.onended = null; voiceSrc.stop(); } catch {} }
+    voiceSrc = null; voiceBuf = null; voiceRaw = null;
     ui?.remove();
     ui = subEl = titleEl = null;
     if (onKey) window.removeEventListener('keydown', onKey);

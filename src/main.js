@@ -258,6 +258,7 @@ const player = new Player(camera, canvas);
 const dialogue = new Dialogue();
 const effects = new Effects(canvas);
 const audio = new AudioManager();
+effects.audio = audio; // every error() gets the crash sound, even if a scene forgets to pass it
 const interact = new Interact(camera, {
   isBlocked: () => dialogue.active || transitioning,
   getOccluders: () => player.colliders,

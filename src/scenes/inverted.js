@@ -2048,7 +2048,7 @@ function startGlobeSequence() {
     worldLights: (() => { const l = []; s.world.traverse((o) => { if (o.isLight) l.push([o, o.intensity]); }); return l; })(),
   };
 
-  effects.error({ duration: T.error * 1000 });
+  effects.error({ duration: T.error * 1000, audio });
   audio.glitch();
 }
 

@@ -16,8 +16,17 @@ export class AudioManager {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
       this.ctx = new AC();
+      // master → compressor → makeup gain → speakers: lifts quiet sounds, stops loud ones clipping.
       this.master = this.ctx.createGain();
-      this.master.connect(this.ctx.destination);
+      const comp = this.ctx.createDynamicsCompressor();
+      comp.threshold.value = -20;
+      comp.knee.value = 12;
+      comp.ratio.value = 4;
+      comp.attack.value = 0.003;
+      comp.release.value = 0.2;
+      const makeup = this.ctx.createGain();
+      makeup.gain.value = 2.2;
+      this.master.connect(comp).connect(makeup).connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') this.ctx.resume();
   }
