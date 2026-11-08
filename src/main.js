@@ -284,6 +284,7 @@ async function goTo(name, { fadeColor = '#000', fadeOutMs = 400, fadeInMs = 400 
     disposeScene(currentScene);
 
     player.reset();
+    player.hideCrosshair = false; // a scene can hide it for its own cutscene (e.g. the conveyor intro)
     interact.clear();
     dialogue.clear();
     effects.clear();
@@ -396,7 +397,7 @@ renderer.setAnimationLoop(() => {
   } catch (e) {
     console.error(e);
   }
-  crosshair.style.visibility = player.enabled ? 'visible' : 'hidden'; // hidden during cutscenes
+  crosshair.style.visibility = player.enabled && !player.hideCrosshair ? 'visible' : 'hidden'; // hidden during cutscenes
   if (ssaoPass.enabled) syncSSAOCamera();
   composer.render(dt);
   trackPerf(rawDt);

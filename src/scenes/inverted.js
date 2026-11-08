@@ -13,7 +13,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // player onto it; jumping on it flips back.
 //
 // §6: a holographic Earth globe stands in another plaza on the ground. E on it → ERROR! glitch →
-// it becomes a miniature Quirkland (candy-strewn hills under a dome of grinning mouths) with a small
+// it becomes a miniature Quirkland (candy-strewn hills under a rainbow-walled dome) with a small
 // friendly fire hydrant on it → the whole dark world (everything in the `world` group) is pulled
 // into the globe → the camera dollies in until the globe fills the view, holds → white flash →
 // goTo('quirkland') fading in from white. No text; ~7.3s.
@@ -31,7 +31,8 @@ const BUILD_HALF = LOT_HALF - SIDEWALK;
 const KERB_H = 0.15;           // pavement height above the road
 const FLOOR_H = 3.1;           // storey height
 const PLATE = new THREE.Vector2(8, -8); // pressure-plate portal centre (x, z) — plaza lot
-const ZONE_R = 1.2;            // horizontal tolerance for "directly opposite" the portal
+const ZONE_R = 3.0;            // activation radius on the plate's surface (2.5× the original 1.2 m)
+const PLATE_YAW = 0;           // the plate lies flat on the plaza, unrotated
 const FLIP_DELAY = 0.18;       // seconds into the jump before gravity flips
 const SPAWN = new THREE.Vector3(0, 4, 6);
 const HYDRANT_PROP = new THREE.Vector3(2.75, KERB_H, 5.2); // weathered hydrant on the pavement near the start
@@ -110,8 +111,28 @@ function radialTexture(stops) {
 
 const glowTexture = () => radialTexture([[0, 'rgba(255,220,120,1)'], [0.35, 'rgba(255,170,40,0.45)'], [1, 'rgba(255,140,0,0)']]);
 
+/** Position in the plate's own surface coordinates (u, v metres from its centre, in its plane). */
+function plateLocal(pos) {
+  const dx = pos.x - PLATE.x, dz = pos.z - PLATE.y, c = Math.cos(-PLATE_YAW), s = Math.sin(-PLATE_YAW);
+  return [dx * c - dz * s, dx * s + dz * c];
+}
+
 function inZone(pos) {
-  return Math.hypot(pos.x - PLATE.x, pos.z - PLATE.y) < ZONE_R;
+  const [u, v] = plateLocal(pos);
+  return Math.hypot(u, v) < ZONE_R;
+}
+
+/** In the zone AND with a clear vertical line from the player's eye to the plate (no building in between). */
+const _plateRay = new THREE.Raycaster(), _plateEye = new THREE.Vector3(), _plateDir = new THREE.Vector3();
+function canTriggerPlate(player, camera) {
+  if (!inZone(player.position)) return false;
+  _plateEye.copy(camera.position);
+  const plateY = KERB_H + 0.02, dist = Math.abs(_plateEye.y - plateY);
+  _plateDir.set(0, plateY < _plateEye.y ? -1 : 1, 0);
+  _plateRay.set(_plateEye, _plateDir);
+  _plateRay.far = dist;
+  const hits = _plateRay.intersectObjects(player.colliders, false);
+  return !hits.some((h) => h.distance < dist - 0.3); // the plaza surface itself (at the far end) doesn't count
 }
 
 /** Box with UVs in tiles of [tw, th] metres on every face, so tiling PBR textures keep a real-world scale. */
@@ -1387,13 +1408,13 @@ function earthTexture() {
 // ---------- mini world (revealed after E) ----------
 //
 // A miniature Quirkland: bright, warm rolling hills with wobbly paths, candy scattered everywhere,
-// trees, flowers, butterflies and a small friendly fire hydrant — under a dome "ceiling" covered in
-// rows of identical big smiling mouths. Built in the `mini` group's local frame; the group is turned
+// trees, flowers, butterflies and a small friendly fire hydrant — under a dome with rainbow-banded
+// walls and a pale cream top (matching Quirkland). Built in the `mini` group's local frame; the group is turned
 // so local +X faces the camera (+Y up, +Z screen-left). No text anywhere.
 
 const PI = Math.PI;
 const UP = new THREE.Vector3(0, 1, 0);
-const DOME_R = GLOBE_R * 1.75;  // mouth-dome radius
+const DOME_R = GLOBE_R * 1.75;  // dome radius
 const KEY_DIR = new THREE.Vector3(0.75, 0.6, 0.35).normalize();         // warm key light direction
 const HYDRANT_DIR = new THREE.Vector3(Math.cos(1.25), Math.sin(1.25), 0); // near the top, leaning to camera
 const HYDRANT_SCALE = 2;
@@ -1467,58 +1488,19 @@ function bladeGeometry() {
   return geo;
 }
 
-/** One big smiling mouth tile on a bright candy-stripe background; tiles seamlessly. */
-function mouthDomeTexture() {
-  const W = 256, H = 256, c = makeCanvas(W, H), g = c.getContext('2d');
-  // Bright childlike background: diagonal pastel stripes + polka dots.
-  const stripes = ['#ffd6e8', '#fff1a8', '#c9f2ff', '#ffe0b8'];
-  for (let i = -8; i < 16; i++) {
-    g.fillStyle = stripes[(i + 8) % stripes.length];
-    g.beginPath();
-    g.moveTo(i * 32, 0); g.lineTo(i * 32 + 32, 0); g.lineTo(i * 32 + 32 - H, H); g.lineTo(i * 32 - H, H);
-    g.fill();
-  }
-  g.fillStyle = 'rgba(255,255,255,0.55)';
-  for (const [x, y] of [[20, 20], [236, 236], [20, 236], [236, 20], [128, 8], [128, 248], [8, 128], [248, 128]]) {
-    g.beginPath(); g.arc(x, y, 9, 0, PI * 2); g.fill();
-  }
-  // The mouth: a wide grin — dark inside, a row of square teeth, thick red lips.
-  const cx = 128, cy = 132, w = 92, top = 22, bottom = 62;
-  const grin = () => {
-    g.beginPath();
-    g.moveTo(cx - w, cy - 6);
-    g.quadraticCurveTo(cx, cy + top, cx + w, cy - 6);
-    g.quadraticCurveTo(cx, cy + bottom + 30, cx - w, cy - 6);
-    g.closePath();
-  };
-  g.save();
-  g.shadowColor = 'rgba(120,20,40,0.35)';
-  g.shadowBlur = 10;
-  g.lineWidth = 20;
-  g.strokeStyle = '#e8364f';
-  grin();
-  g.stroke();
-  g.restore();
-  g.fillStyle = '#3a0612';
-  grin();
-  g.fill();
-  g.save();
-  grin();
-  g.clip();
-  g.fillStyle = '#ff6f8a'; // tongue
-  g.beginPath(); g.ellipse(cx, cy + 46, 40, 18, 0, 0, PI * 2); g.fill();
-  g.fillStyle = '#fffaf0'; // teeth
-  for (let i = -5; i <= 5; i++) {
-    const x = cx + i * 15;
-    const y = cy - 6 + (top * (1 - Math.pow(i / 6, 2))) * 0.5;
-    g.fillRect(x - 6.5, y - 2, 13, 17);
-  }
-  g.restore();
-  g.lineWidth = 3; // lip highlight
-  g.strokeStyle = 'rgba(255,190,200,0.8)';
-  g.beginPath(); g.moveTo(cx - 50, cy - 8); g.quadraticCurveTo(cx, cy + 6, cx + 50, cy - 8); g.stroke();
+/** The dome, matching Quirkland: broad rainbow bands on the walls (red at the foot → violet higher) under a pale cream top. */
+function domeTexture() {
+  const W = 8, H = 512, c = makeCanvas(W, H), g = c.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, H); // canvas top = dome top
+  grad.addColorStop(0, '#fff6ec');
+  grad.addColorStop(0.32, '#f8efff');
+  grad.addColorStop(0.44, '#eee2ff');
+  const bands = ['#c98bff', '#8a80ff', '#62bcff', '#86d97c', '#ffd95e', '#ffa05a', '#ff6f7d'];
+  bands.forEach((col, i) => grad.addColorStop(0.52 + (i / (bands.length - 1)) * 0.46, col));
+  g.fillStyle = grad;
+  g.fillRect(0, 0, W, H);
   const t = toTexture(c);
-  t.repeat.set(7, 3);
+  t.wrapT = THREE.ClampToEdgeWrapping;
   return t;
 }
 
@@ -1749,8 +1731,8 @@ function buildMiniWorld() {
   const planet = new THREE.Mesh(planetGeo, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.8, emissive: 0x16240a }));
   group.add(planet);
 
-  // Dome ceiling covered in identical big grinning mouths (seen from inside, behind the planet).
-  const domeTex = mouthDomeTexture();
+  // Dome: rainbow walls under a clean pale top (seen from inside, behind the planet).
+  const domeTex = domeTexture();
   const domeMat = new THREE.MeshStandardMaterial({
     map: domeTex, emissiveMap: domeTex, emissive: 0xffffff, emissiveIntensity: 0.55, roughness: 0.6,
     side: THREE.BackSide, transparent: true, opacity: 0,
@@ -1969,7 +1951,7 @@ function landSound() {
 const smoother = (x) => x * x * x * (x * (x * 6 - 15) + 10);           // smootherstep: zero 1st/2nd derivative at ends
 const window01 = (t, a, b) => smoother(clamp01((t - a) / (b - a)));
 const GLOBE_BASE_Y = GLOBE.y - 1.25;   // lowest point of the globe's contents (mini world planet + grass)
-const GLOBE_TOP_Y = GLOBE.y + DOME_R;  // top of the mouth dome
+const GLOBE_TOP_Y = GLOBE.y + DOME_R;  // top of the dome
 const PULL_PIVOT_LOW = new THREE.Vector3(GLOBE.x, GLOBE_BASE_Y - 0.15, GLOBE.z);
 const PULL_PIVOT_HIGH = new THREE.Vector3(GLOBE.x, GLOBE_TOP_Y + 0.3, GLOBE.z);
 
@@ -2018,7 +2000,7 @@ function startGlobeSequence() {
   away.normalize();
   g.mini.group.rotation.y = Math.atan2(-away.z, away.x);
 
-  // Where the dolly ends: far enough back that the whole mini world (mouth dome included) fills the
+  // Where the dolly ends: far enough back that the whole mini world (dome included) fills the
   // view with a margin — computed from the camera's fov/aspect, so nothing gets cropped.
   const centre = GLOBE.clone().add(new THREE.Vector3(0, 0.25, 0));
   const halfV = THREE.MathUtils.degToRad(camera.fov / 2);
@@ -2198,8 +2180,9 @@ export default {
     };
 
     // Pressure plate (the portal): jumping while directly vertically opposite it (or on it) flips gravity.
+    // One jump → at most one flip (pendingFlip guards against a second trigger mid-flip).
     player.onJump((p) => {
-      if (inZone(p.position) && s.pendingFlip === null) s.pendingFlip = FLIP_DELAY;
+      if (s.pendingFlip === null && canTriggerPlate(p, ctx.camera)) s.pendingFlip = FLIP_DELAY;
     });
 
     // Holographic globe: E starts the sequence.

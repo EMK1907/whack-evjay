@@ -3,14 +3,14 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { EYE_HEIGHT } from '../core/player.js';
 
-// Opening scene (docs/GAME.md §2). Owner: Joshua.
+// Opening scene (docs/GAME.md §2). Owner: Emir (originally Joshua).
 //
 // A sterile white processing hall. The player rides a rubber conveyor belt (no walking or jumping,
 // mouse look only) behind a queue of live babies that pass one by one through heavy lead-strip
 // X-ray curtains. An illuminated sign above the scanner reads BACK TO REAL WORLD. When the player
 // reaches the curtains it's their turn and the system malfunctions: the sign glitches to a red
 // DLROW, the hall turns red, any baby still on the belt turns to stare, ERROR! everywhere → cut to
-// black → goTo('fall').
+// black → goTo('inverted'). The whole intro is a cutscene: no crosshair (player.hideCrosshair).
 //
 // Rendering: neutral clinical HDRI for image-based light + one shadow-casting key light whose
 // frustum follows the player along the belt; PBR texture sets from assets/ (see CREDITS.md). Static
@@ -19,7 +19,7 @@ import { EYE_HEIGHT } from '../core/player.js';
 // is one InstancedMesh shared by all babies, its instance matrices copied from the joints each frame.
 
 const NAME = 'conveyor';
-const NEXT = 'fall';
+const NEXT = 'inverted';
 
 // ---------- layout (metres; the belt carries the player towards -z) ----------
 const ROOM_W = 12, ROOM_H = 6, ROOM_BACK = 11, ROOM_FRONT = -30;
@@ -38,7 +38,9 @@ const OPENING_W = 2.0, OPENING_TOP = 2.4;
 const SCAN_W = 3.2, SCAN_H = 3.0, SCAN_D = 2.7;
 const VOID_Z = CURTAIN_Z - 2.3;   // babies vanish into the dark tunnel here
 const TRIGGER_Z = CURTAIN_Z + 2.0;
-const SPAWN_Z = 7.5;
+// Start close to the scanner: ~6.5 s of belt travel (at BELT_SPEED) before the malfunction triggers.
+const SPAWN_Z = TRIGGER_Z + BELT_SPEED * 6.5;
+const BABY_GAP = 2.6;
 const SIGN_POS = new THREE.Vector3(0, 3.78, CURTAIN_Z + 0.35);
 const SIGN_W = 3.6;
 
@@ -1179,7 +1181,10 @@ function buildBabies(M, rand) {
   ctx.scene.add(rig);
   const babies = BABY_POSES.map((pose, i) => {
     const b = buildBaby(rig, parts, pose, i, rand);
-    b.root.position.set(0, BELT_Y, SPAWN_Z - 3 - i * 3);
+    // Queue in front of the player; any that wouldn't fit before the curtains have already gone through.
+    let z = SPAWN_Z - BABY_GAP - i * BABY_GAP;
+    if (z <= CURTAIN_Z + 0.3) { z = VOID_Z - 1 - i; b.beeped = true; }
+    b.root.position.set(0, BELT_Y, z);
     return b;
   });
   const meshes = [];
@@ -1392,6 +1397,7 @@ export default {
     ctx = c;
     alive = true;
     phase = 'belt';
+    ctx.player.hideCrosshair = true; // the whole conveyor intro (belt + malfunction) is a cutscene
     time = 0; tickTimer = 0; beltZ = SPAWN_Z;
     redT = 0; redTarget = 0;
     lookQ = null; camBase = null;
