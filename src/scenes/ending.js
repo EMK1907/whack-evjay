@@ -11,7 +11,7 @@ import { buildVoid, VOID_LOOK } from './void.js';
 //   4. The screen turns completely black.
 //   5. A deep voice says exactly: "You will forever be in this loop, you cannot escape" (+ low rumble, subtitle).
 //      The voice is Varshan's recording at assets/audio/voice.(m4a|mp3|wav); speech synthesis is only the fallback.
-//   6. Hold on black, then a small "LOOP" title. The game ends.
+//   6. Hold on black, then a small "LOOP" title. Then it fades back to the main menu (once) — the loop closes.
 // ?debug: R restarts the ending.
 
 const NAME = 'ending';
@@ -32,6 +32,7 @@ let gem = null, ruby = null, core = null, rays = null, glints = [], beacon = nul
 let uniforms = null, field = null, path = null, stars = null, sky = null, vortex = null;
 let ui = null, subEl = null, titleEl = null, onKey = null;
 let voiceEl = null; // the recorded voice line, if one was found
+let returning = false; // the hand-back to the menu has started
 
 const alive = (g) => ctx !== null && g === gen;
 const smoother = (t) => t * t * t * (t * (t * 6 - 15) + 10);
@@ -382,9 +383,17 @@ async function run(g) {
   subEl.style.opacity = '0';
   await wait(2.6); if (!alive(g)) return;
 
-  // 6. The game ends.
+  // 6. The game ends...
   titleEl.style.opacity = '1';
-  audio.tone(41, 6, { type: 'sine', volume: 0.08 });
+  audio.tone(41, 4, { type: 'sine', volume: 0.08 });
+  await wait(5); if (!alive(g)) return;
+  // ...and the loop closes: back to the main menu, exactly once.
+  titleEl.style.transition = 'opacity 1.6s ease';
+  titleEl.style.opacity = '0';
+  await wait(1.8); if (!alive(g) || returning) return;
+  returning = true;
+  try { if (document.pointerLockElement) document.exitPointerLock(); } catch {}
+  ctx.goTo('menu', { fadeOutMs: 300, fadeInMs: 1200 });
 }
 
 // ---------- scene ----------
@@ -396,6 +405,7 @@ export default {
     gen++;
     const g = gen;
     tasks = []; glints = [];
+    returning = false;
     time = 0; mode = 'gem'; shine = 0; camDist = 1.6; pull = 0;
     const { scene, camera, player } = ctx;
     scene.background = new THREE.Color(0x000000);

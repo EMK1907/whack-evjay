@@ -76,7 +76,7 @@ The player approaches the globe and presses **E** to interact.
 When they interact with it:
 
 - An error effect occurs.
-- The globe transforms into a bright, cheerful miniature Quirkland that looks like a child's imagination: warm, soft rolling hills of bright green grass swaying in the breeze, wobbly paths, round leafy trees, flowers, butterflies, and candy scattered everywhere (lollipops, sweets, candy canes, gumdrops). Above it is a dome "ceiling" in bright childlike colours, covered in many identical big smiling mouths — slightly unsettling. It is warmly lit and a strong contrast to the dark red inverted world. No text is shown.
+- The globe transforms into a bright, cheerful miniature Quirkland that looks like a child's imagination: warm, soft rolling hills of bright green grass swaying in the breeze, wobbly paths, round leafy trees, flowers, butterflies, and candy scattered everywhere (lollipops, sweets, candy canes, gumdrops). Above it is a dome "ceiling" in bright childlike colours (no mouths). It is warmly lit and a strong contrast to the dark red inverted world. No text is shown.
 - Standing on this mini world is a small, friendly red fire hydrant.
 
 The entire inverted world then begins compressing into the globe.
@@ -98,7 +98,7 @@ Quirkland looks like a child's imagination:
 - Bright, warm, soft rolling terrain in playful colours — bright green grass, rounded hills and wobbly paths.
 - Cartoon-like but smooth and polished. Nothing is blocky: rounded shapes, smooth surfaces and eased animation.
 - Candy is scattered across the terrain: lollipops, sweets, candy canes and gumdrops.
-- **There is no sky.** Above is a ceiling covered in many identical big smiling mouths, all moving in sync. It should feel slightly unsettling. The rest of the ceiling is a bright, childlike pattern and colour.
+- **There is no sky.** The world is enclosed by walls in broad, softly blended rainbow bands that wrap all the way round, rising into a clean, pale ceiling. No mouths.
 
 ### Remembered and faded
 
@@ -115,12 +115,11 @@ A cutscene begins. The fire hydrant explains the story of Quirkland, his ability
 
 1. "Oh! A visitor. We haven't had one of those in... well, ever."
 2. "Welcome to Quirkland. Everything here was dreamed up by children — every creature, every tree, every gust of wind."
-3. "We exist because they imagine us. Air, Fire, Nature, Water — four corners, each one built from their stories."
-4. "Me? I'm a fire hydrant. I keep things safe. When fire gets out of hand, I put it out. That's my ability."
-5. "But look at me. See how faded I am? Children don't think about fire hydrants anymore."
-6. "The more a child forgets you, the more you fade. Your ability weakens. One day... you just aren't here."
-7. "The others — the kangaroo, the kite, the infernal one — they're bright and strong. Children still dream about them every night."
-8. "Come on. I'll show you around. Stick close — I don't get to talk to anyone new."
+3. "Me? I'm a fire hydrant. I keep things safe. When fire gets out of hand, I put it out. That's my ability."
+4. "But look at me. See how faded I am? Children don't think about fire hydrants anymore."
+5. "The more a child forgets you, the more you fade. Your ability weakens. One day... you just aren't here."
+6. "The others — the kangaroo, the kite, the infernal one — they're bright and strong. Children still dream about them every night."
+7. "Come on. I'll show you around. Stick close — I don't get to talk to anyone new."
 
 ## 8. Exploring Quirkland and Meeting Its Inhabitants
 
@@ -164,13 +163,14 @@ When the player first sees him, the fire hydrant reacts and says exactly:
 
 **"He's unfamiliar."**
 
-The player approaches the mysterious figure and presses **E** to interact.
+He stands with his back to the player until he notices them, then turns to face them. Everything about him is completely black.
 
-The figure removes its mask.
+The player approaches the mysterious figure and presses **E** to interact. The cutscene lasts exactly 5 seconds of game time:
 
-Instead of a normal face, there is only black darkness, with a ruby visible.
-
-The camera zooms in towards the figure's face and the ruby.
+- 0.0–1.0 s: the player can still look up at him (gently assisted).
+- 1.0–2.2 s: the camera is taken smoothly; he leans down and briefly rests his hand on the player's head.
+- 2.2–3.2 s: the hand lifts away and the black face covering is removed, revealing only black darkness, with a red ruby.
+- 3.2–5.0 s: the camera moves continuously into the ruby's centre until it covers all four corners of the screen, then the ending begins.
 
 ## 10. The Ruby and the Final Error
 

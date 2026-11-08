@@ -3,7 +3,7 @@ import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometr
 
 // Quirkland (Varshan) — docs/GAME.md §7–9.
 // A child's imagination: soft rolling green hills, wobbly paths and candy everywhere. There is no sky —
-// overhead is a bright patterned ceiling covered in identical big smiling mouths.
+// it is enclosed by soft rainbow walls under a clean, pale ceiling.
 // Arrival: the globe transition zooms into the Fire Hydrant; the camera pulls back to the player standing
 // right in front of him, and his intro cutscene plays. Afterwards he follows the player as a companion.
 // Every character has a `remembered` value (0–1) that controls how faded / desaturated they look.
@@ -26,7 +26,6 @@ const CORRIDOR_W = 1.7;         // half-width of the valley path
 const HEDGE_Z = -PLAY_R - 1;    // where the hedge blocks the valley
 const NEEDED = 5;               // encounters needed before the hedge opens
 const CEIL_R = 95, CEIL_H = 34; // ceiling dome (ellipsoid) radius / height
-const MOUTH_SIZE = 5.5;
 
 // How much children remember each character: 1 = bright and strong, 0 = gone.
 const REMEMBERED = { hydrant: 0.2, kangaroo: 1.0, infernal: 0.9, kite: 0.85, rock: 0.6, water: 0.45, tongue: 0.3 };
@@ -43,7 +42,6 @@ const V = (x, y, z) => new THREE.Vector3(x, y, z);
 const INTRO = [
   "Oh! A visitor. We haven't had one of those in... well, ever.",
   'Welcome to Quirkland. Everything here was dreamed up by children — every creature, every tree, every gust of wind.',
-  'We exist because they imagine us. Air, Fire, Nature, Water — four corners, each one built from their stories.',
   "Me? I'm a fire hydrant. I keep things safe. When fire gets out of hand, I put it out. That's my ability.",
   "But look at me. See how faded I am? Children don't think about fire hydrants anymore.",
   'The more a child forgets you, the more you fade. Your ability weakens. One day... you just aren\'t here.',
@@ -301,6 +299,7 @@ function buildWorld() {
 }
 
 const _grey = new THREE.Color();
+const WALL_BANDS = [0xff6f7d, 0xffa05a, 0xffd95e, 0x86d97c, 0x62bcff, 0x8a80ff, 0xc98bff].map((h) => new THREE.Color(h));
 function buildTerrain() {
   // Split into chunks so the player's raycasts only test nearby triangles.
   const SIZE = 136, CHUNKS = 8, SEG = 32, cs = SIZE / CHUNKS;
@@ -328,8 +327,12 @@ function buildTerrain() {
         col.copy(cA).lerp(cB, v * 0.6);
         col.lerp(cC, smooth(0.3, 1, Math.sin(x * 0.07 - z * 0.11) * 0.5 + 0.5) * 0.35);
         col.lerp(sun, smooth(2.5, 5, h) * (1 - smooth(PLAY_R - 2, PLAY_R + 10, r)) * 0.4);
-        pastel.setHSL(((Math.atan2(z, x) / (Math.PI * 2)) + 1) % 1, 0.85, 0.8);
-        col.lerp(pastel, smooth(PLAY_R - 2, PLAY_R + 20, r) * 0.85);
+        // The enclosing walls (the steep rim): broad rainbow bands by height — red at the foot, violet at the top —
+        // wrapping consistently all the way round.
+        const bt = Math.min(1, Math.max(0, (h - 2.5) / 31)) * (WALL_BANDS.length - 1);
+        const bk = Math.min(WALL_BANDS.length - 2, Math.floor(bt)), bf = bt - bk;
+        pastel.copy(WALL_BANDS[bk]).lerp(WALL_BANDS[bk + 1], bf * bf * (3 - 2 * bf));
+        col.lerp(pastel, smooth(PLAY_R + 1, PLAY_R + 12, r) * 0.93);
         // The clearing and its valley: drained of colour — nothing here was dreamed up by a child.
         const dcl = Math.hypot(x - CLEAR_C[0], z - CLEAR_C[1]);
         const drain = Math.max(1 - smooth(CLEAR_R - 2, CLEAR_R + 5, dcl), (1 - smooth(CORRIDOR_W, CORRIDOR_W + 4, Math.abs(x))) * smooth(-PLAY_R + 1, -PLAY_R - 6, z) * 0.7);
@@ -345,98 +348,31 @@ function buildTerrain() {
 }
 
 function buildCeiling() {
-  // Bright childlike pattern: soft rainbow swirl bands with polka dots.
-  const dome = new THREE.Mesh(new THREE.SphereGeometry(CEIL_R, 128, 64, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.ShaderMaterial({
-    side: THREE.BackSide, fog: false,
-    uniforms: { time: { value: 0 } },
-    vertexShader: 'varying vec3 vP; void main() { vP = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-    fragmentShader: `
-      uniform float time; varying vec3 vP;
-      vec3 hsl2rgb(vec3 c) {
-        vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
-        return c.z + c.y * (rgb - 0.5) * (1.0 - abs(2.0 * c.z - 1.0));
-      }
-      void main() {
-        float az = atan(vP.z, vP.x) / 6.28318;
-        float el = vP.y;
-        float s = az * 3.0 + el * 3.5 + time * 0.01;
-        float band = s * 6.0;
-        float f = fract(band);
-        float hue = (floor(band) + smoothstep(0.82, 1.0, f)) / 6.0;
-        vec3 col = hsl2rgb(vec3(fract(hue), 0.8, 0.8));
-        vec2 uv = vec2(az * 40.0, el * 18.0);
-        float dots = 1.0 - smoothstep(0.17, 0.22, length(fract(uv) - 0.5));
-        col = mix(col, vec3(1.0, 0.98, 0.92), dots * 0.8);
-        gl_FragColor = vec4(pow(col, vec3(2.2)) * 1.4, 1.0); // linear; unlit, so lifted to read bright under ACES
-        #include <colorspace_fragment>
-      }`,
-  }));
+  // The ceiling over the enclosure (the rainbow walls are the rim hills — see buildTerrain): a clean, pale surface,
+  // cream overhead shading to a soft lilac where it meets the violet tops of the walls. Lit and gently undulating,
+  // so it reads as a real surface rather than a flat backdrop.
+  const geo = new THREE.SphereGeometry(CEIL_R, 160, 64, 0, Math.PI * 2, 0, Math.PI / 2);
+  const pos = geo.attributes.position, n = pos.count;
+  const col = new Float32Array(n * 3), c = new THREE.Color(), top = new THREE.Color(0xfff6ec), edge = new THREE.Color(0xeee2ff);
+  for (let i = 0; i < n; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const e = y / CEIL_R, az = Math.atan2(z, x);
+    const bump = 1 + 0.01 * Math.sin(az * 9 + e * 5) * Math.sin(e * 14 + az * 2) + 0.005 * Math.sin(az * 31 + e * 23);
+    pos.setXYZ(i, x * bump, y * bump, z * bump);
+    c.copy(edge).lerp(top, smooth(0.45, 0.95, e));
+    col.set([c.r, c.g, c.b], i * 3);
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.computeVertexNormals();
+  // diffuse kept low (the world's green bounce light would tint it); most of its brightness is a soft self-glow
+  const mat = new THREE.MeshStandardMaterial({ color: 0x8a8a8a, vertexColors: true, roughness: 0.9, metalness: 0, side: THREE.BackSide, fog: false, emissive: 0xffffff, emissiveIntensity: 0.85 });
+  mat.onBeforeCompile = (sh) => {
+    sh.fragmentShader = sh.fragmentShader.replace('vec3 totalEmissiveRadiance = emissive;', 'vec3 totalEmissiveRadiance = emissive * vColor.rgb;');
+  };
+  const dome = new THREE.Mesh(geo, mat);
   dome.scale.y = CEIL_H / CEIL_R;
   dome.userData.sky = true; // no shadows / SSAO from the ceiling
   ctx.scene.add(dome);
-  every(() => { dome.material.uniforms.time.value = time; });
-
-  // One mouth design, copied all over the ceiling — identical, and all moving in perfect sync.
-  const yU = (x) => 0.05 + 0.25 * x * x;    // upper lip line
-  const yL = (x) => -0.75 + 1.05 * x * x;   // lower lip line (big open grin)
-  const outline = [];
-  for (let i = 0; i <= 14; i++) { const x = -1 + (2 * i) / 14; outline.push(new THREE.Vector2(x, yU(x))); }
-  for (let i = 13; i >= 1; i--) { const x = -1 + (2 * i) / 14; outline.push(new THREE.Vector2(x, yL(x))); }
-  const lipGeo = new THREE.TubeGeometry(
-    new THREE.CatmullRomCurve3(outline.map((p) => V(p.x, p.y, 0)), true, 'centripetal'), 240, 0.075, 16, true);
-  const innerGeo = new THREE.ShapeGeometry(new THREE.Shape(outline), 24);
-  const teeth = [];
-  for (let i = 0; i < 7; i++) {
-    const x = -0.6 + i * 0.2;
-    teeth.push(new THREE.CapsuleGeometry(0.065, 0.06, 8, 16).scale(1, 1, 0.45).translate(x, yU(x) - 0.1, 0.02));
-  }
-  const teethGeo = mergeGeometries(teeth);
-  const tongueGeo = new THREE.SphereGeometry(1, 32, 16).scale(0.36, 0.16, 0.07);
-  const dimpleGeo = new THREE.SphereGeometry(0.06, 16, 12);
-
-  const lipMat = std(0xff3d64, { roughness: 0.3, emissive: 0xa0102c, emissiveIntensity: 0.6, fog: false });
-  const innerMat = new THREE.MeshBasicMaterial({ color: 0x4a0618, side: THREE.DoubleSide, fog: false });
-  const toothMat = std(0xffffff, { roughness: 0.25, emissive: 0xfff4ea, emissiveIntensity: 0.55, fog: false });
-  const tongueMat = std(0xff7a9a, { roughness: 0.5, emissive: 0xc03050, emissiveIntensity: 0.5, fog: false });
-
-  const mouths = [];
-  const tongues = [];
-  const n = V(0, 0, 0), p = V(0, 0, 0), toEye = V(0, 0, 0), face = V(0, 0, 0);
-  const rings = [[0, 1, 0], [17, 6, 0.3], [31, 10, 0], [44, 13, 0.2], [57, 17, 0.1]];
-  for (const [rho, count, off] of rings) {
-    for (let i = 0; i < count; i++) {
-      const th = (i / count) * Math.PI * 2 + off;
-      const y = CEIL_H * Math.sqrt(1 - (rho / CEIL_R) ** 2);
-      p.set(Math.cos(th) * rho, y, Math.sin(th) * rho);
-      n.set(p.x / (CEIL_R * CEIL_R), p.y / (CEIL_H * CEIL_H), p.z / (CEIL_R * CEIL_R)).normalize();
-      const g = new THREE.Group();
-      // Face partly toward the middle of the world, so they look down at whoever is there.
-      toEye.set(-p.x, 2 - p.y, -p.z).normalize();
-      face.copy(n).negate().lerp(toEye, 0.55).normalize();
-      g.position.copy(p).addScaledVector(n, -1.4);
-      if (rho === 0) g.up.set(0, 0, -1);
-      g.lookAt(g.position.x + face.x, g.position.y + face.y, g.position.z + face.z);
-      g.userData.sky = true;
-      ctx.scene.add(g);
-      const inner = new THREE.Group(); // the part that animates
-      g.add(inner);
-      mesh(innerGeo, innerMat, 0, 0, -0.02, inner);
-      mesh(lipGeo, lipMat, 0, 0, 0, inner);
-      mesh(teethGeo, toothMat, 0, 0, 0, inner);
-      tongues.push(mesh(tongueGeo, tongueMat, 0, -0.52, 0.01, inner));
-      for (const sx of [-1, 1]) mesh(dimpleGeo, lipMat, sx * 1.1, 0.3, 0, inner);
-      mouths.push(inner);
-    }
-  }
-  every(() => {
-    // Slow synchronized breathing, and every few seconds they all grin wider at once.
-    const breathe = Math.sin(time * 1.3);
-    const grin = Math.pow(Math.max(0, Math.sin(time * 0.7)), 12);
-    const sx = MOUTH_SIZE * (1 + grin * 0.14), sy = MOUTH_SIZE * (1 + breathe * 0.06 + grin * 0.12);
-    for (const m of mouths) m.scale.set(sx, sy, MOUTH_SIZE);
-    const tx = Math.sin(time * 2) * 0.05;
-    for (const t of tongues) t.position.x = tx;
-  });
 }
 
 function ribbon(curve, { closed = false, width = 2, color, y = 0.05, N = 260, wobble = 0.25, seed = 0, offset = -1, record = false }) {
@@ -2727,7 +2663,7 @@ function buildMaskedFigure() {
   gl_FragColor.rgb += vec3(1.0, 0.04, 0.07) * (crackCore * 3.2 + crackHalo * 0.35) * glow;`);
   };
   const mask = mesh(maskGeo, maskMat, MC.x, MC.y, MC.z, head);
-  mask.visible = true; // his face: solid glossy black from the start, ruby set in the forehead
+  mask.visible = true; // his face: covered in solid glossy black; the ruby lies hidden beneath it
 
   // The ruby is embedded in the forehead of the mask (sunk a little into the surface).
   const rubyMat = std(0xd0002a, { roughness: 0.12, metalness: 0.3, emissive: 0x3a0006, emissiveIntensity: 1, flatShading: true, side: THREE.DoubleSide });
@@ -2742,6 +2678,8 @@ function buildMaskedFigure() {
     ruby.position.copy(p0).add(MC).addScaledVector(n, -0.012);
     ruby.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
   }
+
+  ruby.visible = false;
 
   // Arms (clavicle > upper arm > forearm > hand > fingers).
   const arms = [];
@@ -2836,13 +2774,14 @@ function buildMaskedFigure() {
     seen: false, revealing: false, token: 0, done: false,
     // drive values (sequence sets these; springs smooth them)
     attend: sp(0), torsoFollow: 0, lookUp: sp(0), handOnHead: 0, handBlend: sp(0), fingerCurl: 0, maskGrow: 1, crackGlow: 0,
-    rootYaw: sp(FIG_AWAY), yawTarget: FIG_AWAY,
+    rootYaw: sp(FIG_AWAY), yawTarget: FIG_AWAY, turnRate: 1.1, facing: false,
+    bend: sp(0), bendT: 0, handTarget: null, frozen: false, cine: null,
     yaw: { hips: sp(), spine: sp(), chest: sp(), neck: sp(), head: sp() },
     pitch: { chest: sp(), neck: sp(), head: sp() },
     cam: null,
   };
   resetCoat(mf);
-  ctx.interact.add(root, () => revealMaskedFigure(mf), { distance: 8 });
+  ctx.interact.add(root, () => revealMaskedFigure(mf), { distance: 4.5 }); // close: he has to be able to reach you
   every((dt) => updateFigure(mf, dt));
   return mf;
 }
@@ -2863,6 +2802,8 @@ function resetCoat(mf) {
 
 const _stepV = new THREE.Vector3();
 function updateFigure(mf, dt) {
+  if (mf.cine) updateCine(mf, dt);
+  if (mf.frozen) return; // the final push: hold him perfectly still so the ruby doesn't jitter at close range
   const t = time;
   const { root, hips, spine, chest, neck, head } = mf;
   const cam = ctx.camera;
@@ -2895,15 +2836,26 @@ function updateFigure(mf, dt) {
   const breath = Math.sin(t * 1.55);
   hips.position.set(0.03 * noise(t * 0.3, 1), FIG.hipY - 0.02 + 0.012 * breath, 0.02 * noise(t * 0.25, 9));
   hips.rotation.set(0.01 * noise(t * 0.33, 2), Y.hips.x, 0.022 * noise(t * 0.27, 5));
-  spine.rotation.set(0.015 * breath, Y.spine.x, -0.012 * noise(t * 0.29, 6));
-  chest.rotation.set(P.chest.x + 0.02 * breath, Y.chest.x, 0.01 * noise(t * 0.31, 7));
+  const bend = spring(mf.bend, mf.bendT, 2.4, dt); // leaning down towards you
+  spine.rotation.set(0.015 * breath + 0.42 * bend, Y.spine.x, -0.012 * noise(t * 0.29, 6));
+  chest.rotation.set(P.chest.x + 0.02 * breath + 0.3 * bend, Y.chest.x, 0.01 * noise(t * 0.31, 7));
   chest.scale.set(1 + 0.022 * breath, 1, 1 + 0.03 * breath);
   neck.rotation.set(P.neck.x + 0.015 * noise(t * 0.5, 8), Y.neck.x, 0.02 * noise(t * 0.4, 10));
   head.rotation.set(P.head.x + 0.02 * noise(t * 0.7, 3), Y.head.x + 0.02 * noise(t * 0.55, 12), 0.05 + 0.03 * noise(t * 0.6, 2));
   root.updateMatrixWorld(true);
 
   // ---- whole-body turn: the root yaw springs round; feet step to keep up (one foot at a time, lifted in an arc) ----
-  root.rotation.y = spring(mf.rootYaw, mf.yawTarget, 1.1, dt);
+  // Once he has noticed you (or you're close), he turns to face you — and keeps re-facing you if you circle him.
+  if (!mf.facing && !mf.cine) {
+    root.position.distanceTo(_a.copy(cam.position).setY(root.position.y)) < 12 && (mf.facing = true);
+  }
+  if (mf.facing && !mf.cine) {
+    const want = Math.atan2(cam.position.x - root.position.x, cam.position.z - root.position.z);
+    const d = Math.atan2(Math.sin(want - mf.yawTarget), Math.cos(want - mf.yawTarget));
+    if (Math.abs(d) > 0.35) mf.yawTarget += d;
+    mf.attending = true; mf.torsoFollow = 1;
+  }
+  root.rotation.y = spring(mf.rootYaw, mf.yawTarget, mf.turnRate, dt);
   root.updateMatrixWorld(true);
   for (let i = 0; i < 2; i++) {
     const L = mf.legs[i], O = mf.legs[1 - i];
@@ -2935,10 +2887,11 @@ function updateFigure(mf, dt) {
   const blend = spring(mf.handBlend, mf.handOnHead, 1.3, dt);
   for (const A of mf.arms) {
     const raising = A.sx === 1 && mf.handOnHead;
-    if (raising) head.localToWorld(_c.set(0.02, 0.6, -0.16));
+    if (raising && mf.handTarget) _c.copy(mf.handTarget);
+    else if (raising) head.localToWorld(_c.set(0.02, 0.6, -0.16));
     else chest.localToWorld(_c.set(A.sx * 0.4 + 0.02 * noise(t * 0.4, A.sx * 3), -1.86, 0.1 + 0.03 * noise(t * 0.35, A.sx * 5)));
     root.worldToLocal(_c);
-    const zeta = raising ? 0.62 : 1, om = raising ? 1.25 : 1.6;
+    const zeta = raising ? (mf.handTarget ? 0.95 : 0.62) : 1, om = raising ? (mf.handTarget ? 3.4 : 1.25) : (mf.handTarget ? 2.6 : 1.6);
     if (!A.init) { A.target[0].x = _c.x; A.target[1].x = _c.y; A.target[2].x = _c.z; A.init = true; }
     _d.set(spring(A.target[0], _c.x, om, dt, zeta), spring(A.target[1], _c.y, om, dt, zeta), spring(A.target[2], _c.z, om, dt, zeta));
     root.localToWorld(_d);
@@ -2963,7 +2916,8 @@ function updateFigure(mf, dt) {
   mf.maskU.uGrow.value = mf.maskGrow;
   mf.maskU.uCrack.value = mf.crackGlow;
   mf.maskU.uTime.value = t;
-  mf.mask.visible = true;
+  mf.mask.visible = mf.maskGrow > 0.002;
+  mf.ruby.visible = mf.maskGrow < 0.97;
 
   updateCoat(mf, dt);
 
@@ -2976,7 +2930,6 @@ function updateFigure(mf, dt) {
     mf.dust.emit(_a, _b, 4 + Math.random() * 3);
   }
 
-  if (mf.cam) updateRevealCamera(mf, dt);
 }
 
 function updateCoat(mf, dt) {
@@ -3062,6 +3015,7 @@ function checkFirstSight(mf, dt) {
   _hits.length = 0;
   if (_ray.intersectObjects(ctx.player.colliders, false, _hits).length) return;
   mf.seen = true;
+  mf.facing = true;
   sayUnfamiliar(mf);
 }
 
@@ -3092,132 +3046,187 @@ function rubyFillsScreen(mf) {
   return true;
 }
 
-// ---- the reveal camera: springs for framing, then a slow eased push into the ruby ----
-const _camT = new THREE.Vector3(), _rubyW = new THREE.Vector3(), _rubyN = new THREE.Vector3(), _end = new THREE.Vector3();
-function updateRevealCamera(mf, dt) {
-  const c = mf.cam, cam = ctx.camera;
-  mf.ruby.getWorldPosition(_rubyW);
-  if (c.push) {
-    const p = smoother(Math.min(1, spring(c.p, 1, 0.5, dt))); // critically damped progress, then smootherstep
-    _rubyN.set(0, 1, 0).transformDirection(mf.ruby.matrixWorld);
-    _end.copy(_rubyW).addScaledVector(_rubyN, Math.max(c.creep, 0.075));
-    cam.position.copy(c.from).lerp(_end, p);
-    cam.fov = c.fov0 + (12 - c.fov0) * p - c.extraZoom;
-    cam.updateProjectionMatrix();
-    cam.lookAt(_rubyW); // dead centre, every frame
-    c.progress = p;
+// ---- the five-second cutscene: one timeline, driven by active game time (dt), from accepted E to goTo('ending') ----
+//   0.0–1.0  you can still look (gently assisted up towards his face); you can't walk
+//   1.0–2.2  the camera is taken smoothly; he leans down and rests his hand on your head
+//   2.2–3.2  the hand lifts away; the black covering dissolves, revealing darkness and the red ruby
+//   3.2–5.0  a continuous push to the ruby's centre until it covers all four corners; then goTo('ending') once
+const CINE_SEC = 5.0;
+const _cq = new THREE.Quaternion(), _cm = new THREE.Matrix4(), _cUp = new THREE.Vector3(0, 1, 0);
+const _cP = new THREE.Vector3(), _cL = new THREE.Vector3(), _cH = new THREE.Vector3(), _cR = new THREE.Vector3(), _cN = new THREE.Vector3(), _cS = new THREE.Vector3();
+const wrapA = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const sstep = (a, b, x) => smoother(Math.min(1, Math.max(0, (x - a) / (b - a))));
+
+function lookQuat(from, at, out) {
+  _cm.lookAt(from, at, _cUp);
+  return out.setFromRotationMatrix(_cm);
+}
+
+function startCine(mf) {
+  const cam = ctx.camera, root = mf.root.position;
+  _cP.set(cam.position.x - root.x, 0, cam.position.z - root.z);
+  if (_cP.lengthSq() < 1e-4) _cP.set(0, 0, 1);
+  _cP.normalize();
+  const sx = root.x + _cP.x * 1.4, sz = root.z + _cP.z * 1.4; // within arm's reach once he leans down
+  mf.cine = {
+    t: 0, wall: performance.now(), took: false, pushing: false, handed: false,
+    freeze: ctx.player.position.clone(),
+    stage: new THREE.Vector3(sx, H(sx, sz) + 1.6, sz),
+    p1: new THREE.Vector3(), q1: new THREE.Quaternion(), p2: new THREE.Vector3(), end: new THREE.Vector3(), fov0: cam.fov, fovEnd: cam.fov,
+    sounds: 0,
+  };
+  // He is already facing you (staged as you approached); square up fully and quickly.
+  mf.facing = true; mf.attending = true; mf.torsoFollow = 1; mf.turnRate = 2.8;
+  mf.yawTarget = mf.rootYaw.x + wrapA(Math.atan2(cam.position.x - root.x, cam.position.z - root.z) - mf.rootYaw.x);
+  ctx.audio.tone(55, 5.5, { type: 'sine', volume: 0.13 });
+  ctx.audio.tone(58, 5.5, { type: 'sine', volume: 0.08 });
+}
+
+// The final camera pose: straight down the ruby's axis, close enough (with a FOV chosen for this screen's
+// aspect ratio) that the ruby's silhouette is wider than the view's diagonal — all four corners are ruby.
+function planPush(mf, c) {
+  const cam = ctx.camera;
+  mf.ruby.updateWorldMatrix(true, false);
+  mf.ruby.getWorldPosition(_cR);
+  _cN.set(0, 1, 0).transformDirection(mf.ruby.matrixWorld);
+  mf.ruby.getWorldScale(_cS);
+  const s = _cS.x, r = 0.06 * s;                 // silhouette radius of the cut stone
+  const d = 0.04 * s + 0.08;                     // camera distance from the girdle plane: just off the table
+  const tanHalf = (0.6 * r) / (d * Math.sqrt(1 + cam.aspect * cam.aspect));
+  c.fovEnd = THREE.MathUtils.radToDeg(2 * Math.atan(tanHalf));
+  c.end.copy(_cR).addScaledVector(_cN, d);
+  c.rubyC = _cR.clone();
+}
+
+function updateCine(mf, dt) {
+  const c = mf.cine, cam = ctx.camera, player = ctx.player;
+  if (!c || c.handed) return;
+  c.t += dt;
+  const t = c.t;
+  mf.head.getWorldPosition(_cH);
+  mf.ruby.getWorldPosition(_cR);
+
+  if (t < 1.0) {
+    // 1. You can look; you can't walk. A gentle pull of the view up towards his face.
+    player.position.copy(c.freeze); player.velocity.set(0, 0, 0);
+    _cP.subVectors(_cH, cam.position);
+    const yawD = Math.atan2(-_cP.x, -_cP.z), pitchD = Math.atan2(_cP.y, Math.hypot(_cP.x, _cP.z));
+    const k = 1 - Math.exp(-dt * 2.2);
+    player.yaw += wrapA(yawD - player.yaw) * k;
+    player.pitch += (Math.min(1.45, pitchD) - player.pitch) * k;
     return;
   }
-  // Framing: position and look target each follow their goal through a critically damped spring.
-  mf.head.getWorldPosition(_camT);
-  _camT.lerp(mf.root.position, 0.45 * (1 - mf.lookUp.x));
-  _camT.y += 0.4 * (1 - mf.lookUp.x);
-  cam.position.set(spring(c.px, c.goal.x, 0.9, dt), spring(c.py, c.goal.y, 0.9, dt), spring(c.pz, c.goal.z, 0.9, dt));
-  _b.set(spring(c.lx, _camT.x, 1.1, dt), spring(c.ly, _camT.y, 1.1, dt), spring(c.lz, _camT.z, 1.1, dt));
-  cam.lookAt(_b);
+  if (!c.took) {
+    // 2. Take the camera — from exactly where it is, so there's no snap.
+    c.took = true;
+    player.enabled = false;
+    c.p1.copy(cam.position); c.q1.copy(cam.quaternion);
+    mf.bendT = 1;
+  }
+  if (t < 3.2) {
+    const k = sstep(1.0, 2.2, t);
+    cam.position.lerpVectors(c.p1, c.stage, k);
+    // look at his face, then (as the covering comes off) at the ruby
+    _cL.copy(_cH).lerp(_cR, sstep(2.2, 3.0, t));
+    lookQuat(cam.position, _cL, _cq);
+    cam.quaternion.copy(c.q1).slerp(_cq, k);
+    // the hand: reaches down and rests on your head (just above and in front of the eye — never through it)
+    if (t >= 1.15 && t < 2.2) {
+      _cN.set(0, 0, -1).applyQuaternion(cam.quaternion).setY(0);
+      if (_cN.lengthSq() > 1e-6) _cN.normalize();
+      if (!mf.handTarget) mf.handTarget = new THREE.Vector3();
+      // on top of your head: above the eye (world up) and a touch forward — the fingers stay clear of the lens
+      mf.handTarget.copy(cam.position).addScaledVector(_cUp, 0.44).addScaledVector(_cN, 0.1);
+      mf.handOnHead = 1;
+      if (t > 1.75 && c.sounds === 0) { c.sounds = 1; ctx.audio.tone(70, 0.9, { type: 'sine', volume: 0.12 }); } // contact
+    } else if (t >= 2.2) {
+      mf.handOnHead = 0; // the hand lifts away (springs back to the side)
+    }
+    // 3. The black covering dissolves, outside-in; the ruby is the last thing revealed.
+    mf.maskGrow = 1 - sstep(2.35, 3.05, t);
+    if (t > 2.35 && c.sounds === 1) { c.sounds = 2; ctx.audio.noise(1.2, { volume: 0.035 }); ctx.audio.tone(46, 2.5, { type: 'sine', volume: 0.12 }); }
+    mf.ruby.material.emissiveIntensity = 1 + 2.5 * sstep(2.6, 3.2, t);
+    return;
+  }
+  if (!c.pushing) {
+    // 4. Freeze the figure and push in, continuously, from exactly where the camera is.
+    c.pushing = true;
+    mf.maskGrow = 0; mf.mask.visible = false; mf.ruby.visible = true;
+    mf.handOnHead = 0;
+    mf.frozen = true;
+    c.p2.copy(cam.position);
+    c.fov0 = cam.fov;
+    planPush(mf, c);
+  }
+  const k = sstep(3.2, 4.85, t);
+  cam.position.lerpVectors(c.p2, c.end, k);
+  cam.fov = c.fov0 + (c.fovEnd - c.fov0) * k;
+  cam.updateProjectionMatrix();
+  lookQuat(cam.position, c.rubyC, cam.quaternion); // dead centre of the stone, every frame
+  if (t >= CINE_SEC) {
+    const covered = rubyFillsScreen(mf);
+    if (!covered && t < CINE_SEC + 0.4) { c.end.lerp(c.rubyC, 0.04); return; } // safety net (shouldn't be needed)
+    c.handed = true;
+    mf.coveredAtEnd = covered;
+    mf.cineTime = t;
+    console.info(`Loop: figure cutscene ${t.toFixed(3)} s active time (${((performance.now() - c.wall) / 1000).toFixed(2)} s wall), ruby covers all four corners: ${covered}`);
+    mf.done = true;
+    ctx.goTo(NEXT);
+  }
 }
 
-async function revealMaskedFigure(mf) {
-  if (busy || state !== 'free' || mf.revealing || !unlocked) return;
-  const g = gen;
-  if (!mf.seen) { mf.seen = true; sayUnfamiliar(mf); }
+function revealMaskedFigure(mf) {
+  if (busy || state !== 'free' || mf.revealing || mf.cine || !unlocked) return;
+  mf.revealing = true;
+  mf.seen = true;
   busy = true;
   ctx.interact.enabled = false;
-  await mf.lineDone;
-  if (!alive(g)) return;
-  runReveal(mf, ++mf.token);
-}
-
-async function runReveal(mf, token) {
-  const g = gen;
-  const ok = () => alive(g) && mf.token === token;
-  const { player, camera, audio } = ctx;
-  mf.revealing = true;
-  player.enabled = false;
-
-  // The camera locks: it eases (springs) to a framing spot in front of the figure.
-  const cam = camera.position;
-  _a.set(cam.x - mf.root.position.x, 0, cam.z - mf.root.position.z).normalize();
-  const gx = mf.root.position.x + _a.x * 8.5, gz = mf.root.position.z + _a.z * 8.5;
-  camera.getWorldDirection(_b).multiplyScalar(5).add(cam);
-  mf.cam = {
-    goal: new THREE.Vector3(gx, H(gx, gz) + 2.2, gz),
-    px: sp(cam.x), py: sp(cam.y), pz: sp(cam.z), lx: sp(_b.x), ly: sp(_b.y), lz: sp(_b.z),
-    push: false, p: sp(0), from: new THREE.Vector3(), fov0: camera.fov, creep: 0.12, extraZoom: 0, progress: 0,
-  };
-  audio.tone(55, 9, { type: 'sine', volume: 0.13 });
-  audio.tone(58, 9, { type: 'sine', volume: 0.09 });
-
-  // 1. It notices you: the head turns first, looking back over its shoulder...
-  await wait(0.8); if (!ok()) return;
-  mf.attending = true;
-  await wait(1.6); if (!ok()) return;
-  // ...the shoulders twist after it...
-  mf.torsoFollow = 1;
-  await wait(1.2); if (!ok()) return;
-
-  // 2. ...then the whole body turns round to face you, step by step. Its hands stay hanging at its sides.
-  {
-    const want = Math.atan2(mf.cam.goal.x - mf.root.position.x, mf.cam.goal.z - mf.root.position.z);
-    const d = Math.atan2(Math.sin(want - mf.rootYaw.x), Math.cos(want - mf.rootYaw.x));
-    mf.yawTarget = mf.rootYaw.x + d;
-  }
-  audio.tone(41, 5, { type: 'sine', volume: 0.1 });
-  audio.noise(2.5, { volume: 0.03 });
-  await wait(4.6); if (!ok()) return;
-
-  // 3. It stands facing you. Stillness — just the breathing — and the ruby in its black face.
-  await wait(1.4); if (!ok()) return;
-
-  // 5. The camera slowly pushes in to the ruby until it covers all four corners of the screen.
-  const c = mf.cam;
-  c.from.copy(camera.position);
-  c.fov0 = camera.fov;
-  c.p = sp(0);
-  c.push = true;
-  let covered = false;
-  for (let i = 0; i < 2000 && !covered; i++) {
-    await nextFrame(); if (!ok()) return;
-    covered = c.progress > 0.6 && rubyFillsScreen(mf);
-    if (c.progress > 0.995 && !covered) { c.creep *= 0.985; c.extraZoom = Math.min(6, c.extraZoom + 0.05); } // very wide screens
-  }
-  mf.coveredAtEnd = covered;
-  await wait(0.6); if (!ok()) return;
-  mf.done = true;
-  ctx.goTo(NEXT);
+  ctx.dialogue.clear();
+  if (hydrant) hydrant.watch = null;
+  startCine(mf);
 }
 
 function resetFigure(mf) {
   mf.token++;
   mf.revealing = false; mf.attending = false; mf.torsoFollow = 0; mf.lookingUp = false;
-  mf.handOnHead = 0; mf.fingerCurl = 0; mf.maskGrow = 1; mf.crackGlow = 0; mf.cam = null; mf.done = false;
+  mf.handOnHead = 0; mf.fingerCurl = 0; mf.maskGrow = 1; mf.crackGlow = 0; mf.done = false;
+  mf.cine = null; mf.frozen = false; mf.handTarget = null; mf.bendT = 0; mf.bend.x = 0; mf.bend.v = 0; mf.turnRate = 1.1; mf.facing = false;
+  mf.ruby.visible = false; mf.mask.visible = true; mf.ruby.material.emissiveIntensity = 1;
   mf.rootYaw.x = FIG_AWAY; mf.rootYaw.v = 0; mf.yawTarget = FIG_AWAY; mf.root.rotation.y = FIG_AWAY;
   for (const L of mf.legs) { L.plant.copy(L.home); L.step = false; }
   for (const s of [mf.attend, mf.lookUp, mf.handBlend, ...Object.values(mf.yaw), ...Object.values(mf.pitch)]) { s.x = 0; s.v = 0; }
   for (const A of mf.arms) { A.init = false; A.wrist.x = 0.1; A.wrist.v = 0; for (const F of A.fingers) { F.curl.x = F.base; F.curl.v = 0; } }
 }
 
-/** ?debug R: replay the reveal from the very start, standing in front of the figure. */
+/** ?debug R: stand 4 m in front of the figure (already facing you, as if you'd walked up) and run the cutscene. */
 function replayReveal() {
   const mf = masked;
-  if (!mf || !ctx || mf.done) return;
+  if (!mf || !ctx || mf.done || mf.cine) return;
   resetFigure(mf);
   if (!unlocked) openHedge();
   ctx.dialogue.clear();
   const { player, camera } = ctx;
   camera.fov = 75;
   camera.updateProjectionMatrix();
-  const x = SPOTS.masked[0], z = SPOTS.masked[1] + 8.5; // in front, on the valley side
+  const x = SPOTS.masked[0], z = SPOTS.masked[1] + 4;
   player.position.set(x, H(x, z), z);
   player.velocity.set(0, 0, 0);
   player.yaw = 0;
-  player.pitch = 0.32;
+  player.pitch = 0.15;
   player.enabled = true;
-  mf.seen = true;
-  busy = true;
-  ctx.interact.enabled = false;
+  const face = Math.atan2(x - mf.root.position.x, z - mf.root.position.z);
+  mf.rootYaw.x = mf.yawTarget = face;
+  mf.root.rotation.y = face;
+  mf.root.updateMatrixWorld(true);
+  for (const L of mf.legs) {
+    mf.root.localToWorld(L.plant.set(L.sx * 0.17, 0, 0.02));
+    L.plant.y = H(L.plant.x, L.plant.z) + 0.05;
+    L.step = false;
+  }
+  mf.facing = true; mf.seen = true;
   resetCoat(mf);
-  runReveal(mf, mf.token);
+  state = 'free'; busy = false; hydrant && (hydrant.watch = null);
+  revealMaskedFigure(mf);
 }
 
 function setupShadows() {
