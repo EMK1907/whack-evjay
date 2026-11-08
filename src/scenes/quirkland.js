@@ -2395,38 +2395,89 @@ function buildMaskedFigure() {
   const skull = mesh(new THREE.SphereGeometry(0.24, 40, 28), voidMat, 0, 0.25, 0, head);
   skull.scale.set(0.85, 1.25, 0.95);
 
-  // Mask: grows out from the centre of the face (shader discard with a noisy edge), never pops.
-  const maskU = { uGrow: { value: 0 } };
-  const maskMat = rimify(std(0x060606, { roughness: 0.3, metalness: 0 }), new THREE.Color(0.2, 0.28, 0.48));
+  // Mask: a smooth, featureless porcelain face plate in glossy black (clearcoat catches the rim light).
+  // Subtle brow ridge and cheekbones, no eye holes, no mouth. A thin jagged crack runs down its centre with a
+  // deep red glow inside that beats like a heart. It forms from the centre of the face outward (shader discard
+  // with a noisy edge), and the crack only lights once the mask is complete.
+  const maskU = { uGrow: { value: 0 }, uCrack: { value: 0 }, uTime: { value: 0 } };
+  const MC = new THREE.Vector3(0, 0.25, 0);                 // face-plate centre in head space (= skull centre)
+  const MR = [0.24 * 0.85 * 1.08, 0.24 * 1.25 * 1.08, 0.24 * 0.95 * 1.08];
+  const gauss = (x, s) => Math.exp(-(x * x) / (s * s));
+  /** Point on the mask surface for yaw `th` (0 = straight ahead) and pitch `ph` (up +), relative to MC. */
+  const facePoint = (th, ph, out) => {
+    const cx = Math.sin(th) * Math.cos(ph), cy = Math.sin(ph), cz = Math.cos(th) * Math.cos(ph);
+    const bulge = 0.016 * gauss(ph - 0.3, 0.09) * gauss(th, 0.75)                          // brow ridge
+      - 0.007 * (gauss(th - 0.33, 0.13) + gauss(th + 0.33, 0.13)) * gauss(ph - 0.1, 0.12)     // soft hollows under the brow
+      + 0.013 * (gauss(th - 0.56, 0.22) + gauss(th + 0.56, 0.22)) * gauss(ph + 0.13, 0.12)     // cheekbones
+      + 0.006 * gauss(th, 0.07) * gauss(ph + 0.08, 0.22);                                      // the faintest centre line
+    const narrow = 1 - 0.16 * Math.max(0, -ph);                                               // tapers to the chin
+    out.set(MR[0] * cx * narrow, MR[1] * cy, MR[2] * cz * 0.97);
+    const len = out.length();
+    return out.multiplyScalar((len + bulge) / len);
+  };
+  const maskGeo = (() => {
+    const NT = 64, NP = 48, T0 = -1.3, T1 = 1.3, P0 = -1.05, P1 = 1.15;
+    const pos = [], idx = [], p = new THREE.Vector3();
+    for (let j = 0; j <= NP; j++) for (let i = 0; i <= NT; i++) {
+      facePoint(T0 + ((T1 - T0) * i) / NT, P0 + ((P1 - P0) * j) / NP, p);
+      pos.push(p.x, p.y, p.z);
+      if (i < NT && j < NP) { const a = j * (NT + 1) + i, b = a + NT + 1; idx.push(a, a + 1, b, a + 1, b + 1, b); }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    return geo;
+  })();
+  const maskMat = rimify(new THREE.MeshPhysicalMaterial({
+    color: 0x060606, roughness: 0.3, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.06, side: THREE.DoubleSide,
+  }), new THREE.Color(0.2, 0.28, 0.48));
   const rimCompile = maskMat.onBeforeCompile;
   maskMat.onBeforeCompile = (sh) => {
     rimCompile(sh);
-    sh.uniforms.uGrow = maskU.uGrow;
+    Object.assign(sh.uniforms, maskU);
     sh.vertexShader = 'varying vec3 vMaskPos;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vMaskPos = position;');
-    sh.fragmentShader = 'varying vec3 vMaskPos;\nuniform float uGrow;\n' + sh.fragmentShader
+    sh.fragmentShader = 'varying vec3 vMaskPos;\nuniform float uGrow, uCrack, uTime;\n' + sh.fragmentShader
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
   vec3 mp = normalize(vMaskPos);
   float ang = acos(clamp(dot(mp, normalize(vec3(0.0, -0.12, 1.0))), -1.0, 1.0));
   float nz = sin(mp.x * 31.0 + mp.y * 7.0) * sin(mp.y * 27.0 - mp.z * 11.0) * 0.5 + 0.5;
-  float edge = uGrow * 1.5 - ang + (nz - 0.5) * 0.16 * (1.0 - uGrow);
-  if (edge < 0.0) discard;`)
+  float edge = uGrow * 1.6 - ang + (nz - 0.5) * 0.16 * (1.0 - uGrow);
+  if (edge < 0.0) discard;
+  // The crack: a jagged line down the centre, from just under the ruby to the chin.
+  vec3 q = vMaskPos;
+  float zig = (abs(fract(q.y * 26.0) - 0.5) - 0.25) * 0.026;
+  float cx = zig + 0.006 * sin(q.y * 71.0 + 1.3) + 0.003 * sin(q.y * 193.0);
+  float span = smoothstep(-0.33, -0.27, q.y) * (1.0 - smoothstep(0.09, 0.12, q.y)) * step(0.05, q.z);
+  float w = 0.0032 * (0.7 + 0.5 * sin(q.y * 53.0 + 0.7)) * span;
+  float dc = abs(q.x - cx);
+  float crackCore = (1.0 - smoothstep(w * 0.35, w + 1e-5, dc)) * span;
+  float crackHalo = (1.0 - smoothstep(w, w * 6.0 + 1e-4, dc)) * span;`)
       .replace('#include <opaque_fragment>', `#include <opaque_fragment>
-  gl_FragColor.rgb += vec3(0.30, 0.03, 0.06) * (1.0 - smoothstep(0.0, 0.07, edge)) * (1.0 - smoothstep(0.92, 1.0, uGrow));`);
+  // forming edge: a faint red seam while the mask grows
+  gl_FragColor.rgb += vec3(0.30, 0.03, 0.06) * (1.0 - smoothstep(0.0, 0.07, edge)) * (1.0 - smoothstep(0.92, 1.0, uGrow));
+  // heartbeat: lub-dub roughly every 1.5 s, over a dim ember
+  float ph = fract(uTime / 1.5);
+  float beat = exp(-pow((ph - 0.08) / 0.05, 2.0)) + 0.55 * exp(-pow((ph - 0.27) / 0.06, 2.0));
+  float glow = (0.25 + 1.1 * beat) * uCrack;
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.0), crackCore * uCrack);           // the crack itself is deep
+  gl_FragColor.rgb += vec3(1.0, 0.04, 0.07) * (crackCore * 3.2 + crackHalo * 0.35) * glow;`);
   };
-  const MASK_K = 1.07;
-  const mask = mesh(new THREE.SphereGeometry(1, 48, 32), maskMat, 0, 0.25, 0, head);
-  mask.scale.set(0.24 * 0.85 * MASK_K, 0.24 * 1.25 * MASK_K, 0.24 * 0.95 * MASK_K);
+  const mask = mesh(maskGeo, maskMat, MC.x, MC.y, MC.z, head);
   mask.visible = false;
 
-  // Ruby set into the forehead, standing proud of where the mask will form.
+  // The ruby is embedded in the forehead of the mask (sunk a little into the surface).
   const rubyMat = std(0xd0002a, { roughness: 0.12, metalness: 0.3, emissive: 0x3a0006, emissiveIntensity: 1, flatShading: true, side: THREE.DoubleSide });
   const rubyProf = [[0, -0.06], [0.06, 0], [0.045, 0.032], [0, 0.04]].map(([r, y]) => new THREE.Vector2(r, y));
   const ruby = mesh(new THREE.LatheGeometry(rubyProf, 8), rubyMat, 0, 0, 0, head);
   {
-    const phi = 0.42, b = mask.scale.y, c = mask.scale.z;
-    const py = b * Math.sin(phi), pz = c * Math.cos(phi);
-    ruby.position.set(0, 0.25 + py, pz + 0.01);
-    ruby.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, py / (b * b), pz / (c * c)).normalize());
+    const p0 = facePoint(0, 0.5, new THREE.Vector3());
+    const pu = facePoint(0, 0.51, new THREE.Vector3()).sub(p0);
+    const pr = facePoint(0.01, 0.5, new THREE.Vector3()).sub(p0);
+    const n = new THREE.Vector3().crossVectors(pr, pu).normalize();
+    if (n.z < 0) n.negate();
+    ruby.position.copy(p0).add(MC).addScaledVector(n, -0.012);
+    ruby.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
   }
 
   // Arms (clavicle > upper arm > forearm > hand > fingers).
@@ -2521,7 +2572,7 @@ function buildMaskedFigure() {
     group: root, root, hips, spine, chest, neck, head, mask, maskU, ruby, arms, legs, coat, coatMesh, dust, fogs,
     seen: false, revealing: false, token: 0, done: false,
     // drive values (sequence sets these; springs smooth them)
-    attend: sp(0), torsoFollow: 0, lookUp: sp(0), handOnHead: 0, handBlend: sp(0), fingerCurl: 0, maskGrow: 0,
+    attend: sp(0), torsoFollow: 0, lookUp: sp(0), handOnHead: 0, handBlend: sp(0), fingerCurl: 0, maskGrow: 0, crackGlow: 0,
     yaw: { hips: sp(), spine: sp(), chest: sp(), neck: sp(), head: sp() },
     pitch: { chest: sp(), neck: sp(), head: sp() },
     cam: null,
@@ -2628,6 +2679,8 @@ function updateFigure(mf, dt) {
 
   // ---- mask ----
   mf.maskU.uGrow.value = mf.maskGrow;
+  mf.maskU.uCrack.value = mf.crackGlow;
+  mf.maskU.uTime.value = t;
   mf.mask.visible = mf.maskGrow > 0.001;
 
   updateCoat(mf, dt);
@@ -2837,7 +2890,12 @@ async function runReveal(mf, token) {
   audio.noise(3, { volume: 0.04 });
   await tween(4.0, (t) => { mf.maskGrow = smoother(t); });
   if (!ok()) return;
-  await wait(1.2); if (!ok()) return;
+  // Only once the mask is whole does the crack begin to glow — and to beat.
+  await wait(0.7); if (!ok()) return;
+  audio.tone(46, 2.5, { type: 'sine', volume: 0.12 });
+  await tween(1.6, (t) => { mf.crackGlow = smoother(t); });
+  if (!ok()) return;
+  await wait(1.6); if (!ok()) return;
 
   // 5. The camera slowly pushes in to the ruby until it covers all four corners of the screen.
   const c = mf.cam;
@@ -2860,7 +2918,7 @@ async function runReveal(mf, token) {
 function resetFigure(mf) {
   mf.token++;
   mf.revealing = false; mf.attending = false; mf.torsoFollow = 0; mf.lookingUp = false;
-  mf.handOnHead = 0; mf.fingerCurl = 0; mf.maskGrow = 0; mf.cam = null; mf.done = false;
+  mf.handOnHead = 0; mf.fingerCurl = 0; mf.maskGrow = 0; mf.crackGlow = 0; mf.cam = null; mf.done = false;
   for (const s of [mf.attend, mf.lookUp, mf.handBlend, ...Object.values(mf.yaw), ...Object.values(mf.pitch)]) { s.x = 0; s.v = 0; }
   for (const A of mf.arms) { A.init = false; A.wrist.x = 0.1; A.wrist.v = 0; for (const F of A.fingers) { F.curl.x = F.base; F.curl.v = 0; } }
 }
