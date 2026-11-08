@@ -2282,106 +2282,430 @@ async function tongueStretch(tg, g) {
 }
 
 // ===== 7. The Masked Figure (§9) — not from a child's imagination, so never faded =====
+// A real bone rig (hips > spine > chest > neck > head, clavicle > upper arm > forearm > hand > 3-joint fingers,
+// thigh > shin > foot) with tapered segments on each bone. Everything moves through damped springs driven by dt:
+// lower bones are slower than upper ones (overlap), the head can lead or lag, hands trail their shoulders, a
+// verlet-simulated coat trails the body, and an always-on idle (breathing, sway, noise) means it's never frozen.
+// Feet are planted with 2-bone IK, so they never slide. No allocations in the per-frame path.
+
+// --- springs & noise ---
+const sp = (x = 0) => ({ x, v: 0 });
+/** Damped spring toward `target` (zeta 1 = critically damped; <1 overshoots slightly). Sub-stepped, dt-driven. */
+function spring(s, target, omega, dt, zeta = 1) {
+  for (let t = dt; t > 1e-6; t -= 1 / 120) {
+    const h = Math.min(t, 1 / 120);
+    s.v += (-2 * zeta * omega * s.v - omega * omega * (s.x - target)) * h;
+    s.x += s.v * h;
+  }
+  return s.x;
+}
+const noise = (t, k) => Math.sin(t * 1.13 + k) * 0.5 + Math.sin(t * 2.71 + k * 1.7) * 0.3 + Math.sin(t * 4.37 + k * 2.3) * 0.2;
+const smoother = (t) => t * t * t * (t * (t * 6 - 15) + 10); // smootherstep: slow in, slow out
+
+// --- reusable temporaries (never allocate per frame) ---
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _d = new THREE.Vector3();
+const _ikA = new THREE.Vector3(), _ikD = new THREE.Vector3(), _ikP = new THREE.Vector3(), _ikU = new THREE.Vector3();
+const _ikK = new THREE.Vector3(), _ikE = new THREE.Vector3(), _ikL = new THREE.Vector3();
+const _bx = new THREE.Vector3(), _by = new THREE.Vector3(), _bz = new THREE.Vector3();
+const _hint = new THREE.Vector3(), _front = new THREE.Vector3(), _hint2 = new THREE.Vector3(), _front2 = new THREE.Vector3();
+const _cx = new THREE.Vector3(), _cy = new THREE.Vector3(), _cz = new THREE.Vector3();
+const _bm = new THREE.Matrix4(), _q1 = new THREE.Quaternion(), _qP = new THREE.Quaternion();
+const _hits = [];
+
+/** Point bone's local -Y along dirW and its local +Z toward frontW (world space). */
+function aimBone(bone, dirW, frontW) {
+  _by.copy(dirW).negate();
+  _bz.copy(frontW).addScaledVector(_by, -frontW.dot(_by));
+  if (_bz.lengthSq() < 1e-8) _bz.set(0, 0, 1).addScaledVector(_by, -_by.z);
+  _bz.normalize();
+  _bx.crossVectors(_by, _bz);
+  _q1.setFromRotationMatrix(_bm.makeBasis(_bx, _by, _bz));
+  bone.parent.getWorldQuaternion(_qP);
+  bone.quaternion.copy(_qP.invert().multiply(_q1));
+  bone.updateMatrixWorld(true);
+}
+
+/** Analytic 2-bone IK: upper/lower bones point down their -Y; bend toward `hint`; `front` sets their twist. */
+function ik2(upper, lower, L1, L2, target, hint, front) {
+  upper.getWorldPosition(_ikA);
+  _ikD.subVectors(target, _ikA);
+  const raw = _ikD.length();
+  const dist = THREE.MathUtils.clamp(raw, Math.abs(L1 - L2) + 1e-3, L1 + L2 - 1e-3);
+  _ikD.divideScalar(raw || 1);
+  const cosA = (L1 * L1 + dist * dist - L2 * L2) / (2 * L1 * dist);
+  const sinA = Math.sqrt(Math.max(0, 1 - cosA * cosA));
+  _ikP.copy(hint).addScaledVector(_ikD, -hint.dot(_ikD)).normalize();
+  _ikU.copy(_ikD).multiplyScalar(cosA).addScaledVector(_ikP, sinA);
+  _ikK.copy(_ikA).addScaledVector(_ikU, L1);
+  _ikE.copy(_ikA).addScaledVector(_ikD, dist);
+  _ikL.subVectors(_ikE, _ikK).normalize();
+  aimBone(upper, _ikU, front);
+  aimBone(lower, _ikL, front);
+}
+
+const FIG = { hipY: 3.47, thigh: 1.8, shin: 1.7, spine: 0.75, chest: 0.85, neck: 0.6, upper: 1.45, fore: 1.35 };
+
 function buildMaskedFigure() {
   const [x, z] = SPOTS.masked;
-  const g = standAt(SPOTS.masked);
-  // Entirely black: a matte, light-swallowing body; the mask is black too, but glossy, so it reads as a
-  // separate object you can see him lift off.
-  const black = std(0x020202, { roughness: 0.95, metalness: 0 });
-  const voidMat = new THREE.MeshBasicMaterial({ color: 0x000000 }); // pure darkness, no shading
-  const maskMat = std(0x070707, { roughness: 0.12, metalness: 0, side: THREE.DoubleSide });
+  const root = new THREE.Group();
+  root.position.set(x, H(x, z), z);
+  root.rotation.y = Math.atan2(-x, -z) + Math.PI / 2; // stands side-on to the valley: it has to turn to notice you
+  ctx.scene.add(root);
+
+  // Cold fresnel rim so the black silhouette reads against the grey clearing.
+  const rimify = (mat, rim) => {
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uRim = { value: rim };
+      sh.fragmentShader = 'uniform vec3 uRim;\n' + sh.fragmentShader.replace('#include <opaque_fragment>',
+        '#include <opaque_fragment>\n  gl_FragColor.rgb += uRim * pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);');
+    };
+    return mat;
+  };
+  const RIM = new THREE.Color(0.32, 0.46, 0.78);
+  const black = rimify(std(0x030303, { roughness: 0.9, metalness: 0 }), RIM);
+  const coatMat = rimify(std(0x020203, { roughness: 0.95, side: THREE.DoubleSide }), new THREE.Color(0.05, 0.07, 0.12));
+  const voidMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+
+  const geoCache = new Map();
+  const seg = (bone, len, r0, r1, up = false) => {
+    const k = `${len}|${r0}|${r1}|${up}`;
+    if (!geoCache.has(k)) geoCache.set(k, new THREE.CylinderGeometry(up ? r1 : r0, up ? r0 : r1, len, 14, 1).translate(0, up ? len / 2 : -len / 2, 0));
+    mesh(geoCache.get(k), black, 0, 0, 0, bone);
+    mesh(new THREE.SphereGeometry(r0 * 1.08, 14, 10), black, 0, 0, 0, bone); // joint
+  };
+  const bone = (parent, px, py, pz, order = 'XYZ') => {
+    const b = new THREE.Bone();
+    b.position.set(px, py, pz);
+    b.rotation.order = order;
+    parent.add(b);
+    return b;
+  };
+
+  // Torso chain.
+  const hips = bone(root, 0, FIG.hipY, 0, 'YXZ');
+  mesh(new THREE.SphereGeometry(1, 20, 14), black, 0, 0.02, 0, hips).scale.set(0.2, 0.14, 0.13);
+  const spine = bone(hips, 0, 0.12, 0, 'YXZ');
+  seg(spine, FIG.spine, 0.1, 0.12, true);
+  const chest = bone(spine, 0, FIG.spine, 0, 'YXZ');
+  const ribs = mesh(new THREE.SphereGeometry(1, 24, 16), black, 0, 0.42, 0, chest);
+  ribs.scale.set(0.2, 0.5, 0.12);
+  const neck = bone(chest, 0, FIG.chest, 0, 'YXZ');
+  seg(neck, FIG.neck, 0.045, 0.035, true);
+  const head = bone(neck, 0, FIG.neck, 0, 'YXZ');
+  const skull = mesh(new THREE.SphereGeometry(0.24, 40, 28), voidMat, 0, 0.25, 0, head);
+  skull.scale.set(0.85, 1.25, 0.95);
+
+  // Mask: grows out from the centre of the face (shader discard with a noisy edge), never pops.
+  const maskU = { uGrow: { value: 0 } };
+  const maskMat = rimify(std(0x060606, { roughness: 0.3, metalness: 0 }), new THREE.Color(0.2, 0.28, 0.48));
+  const rimCompile = maskMat.onBeforeCompile;
+  maskMat.onBeforeCompile = (sh) => {
+    rimCompile(sh);
+    sh.uniforms.uGrow = maskU.uGrow;
+    sh.vertexShader = 'varying vec3 vMaskPos;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n  vMaskPos = position;');
+    sh.fragmentShader = 'varying vec3 vMaskPos;\nuniform float uGrow;\n' + sh.fragmentShader
+      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+  vec3 mp = normalize(vMaskPos);
+  float ang = acos(clamp(dot(mp, normalize(vec3(0.0, -0.12, 1.0))), -1.0, 1.0));
+  float nz = sin(mp.x * 31.0 + mp.y * 7.0) * sin(mp.y * 27.0 - mp.z * 11.0) * 0.5 + 0.5;
+  float edge = uGrow * 1.5 - ang + (nz - 0.5) * 0.16 * (1.0 - uGrow);
+  if (edge < 0.0) discard;`)
+      .replace('#include <opaque_fragment>', `#include <opaque_fragment>
+  gl_FragColor.rgb += vec3(0.30, 0.03, 0.06) * (1.0 - smoothstep(0.0, 0.07, edge)) * (1.0 - smoothstep(0.92, 1.0, uGrow));`);
+  };
+  const MASK_K = 1.07;
+  const mask = mesh(new THREE.SphereGeometry(1, 48, 32), maskMat, 0, 0.25, 0, head);
+  mask.scale.set(0.24 * 0.85 * MASK_K, 0.24 * 1.25 * MASK_K, 0.24 * 0.95 * MASK_K);
+  mask.visible = false;
+
+  // Ruby set into the forehead, standing proud of where the mask will form.
   const rubyMat = std(0xd0002a, { roughness: 0.12, metalness: 0.3, emissive: 0x3a0006, emissiveIntensity: 1, flatShading: true, side: THREE.DoubleSide });
-
-  const body = new THREE.Group();
-  g.add(body);
-  // Impossibly long, thin legs.
-  for (const sx of [-1, 1]) {
-    const leg = new THREE.CatmullRomCurve3([V(sx * 0.12, 3.95, 0), V(sx * 0.13, 2.0, 0.08), V(sx * 0.14, 0.12, 0.02)]);
-    mesh(taperTube(leg, 64, 0.075, 0.04, 16), black, 0, 0, 0, body);
-    mesh(new THREE.CapsuleGeometry(0.04, 0.32, 8, 16).rotateX(Math.PI / 2), black, sx * 0.14, 0.05, 0.14, body);
+  const rubyProf = [[0, -0.06], [0.06, 0], [0.045, 0.032], [0, 0.04]].map(([r, y]) => new THREE.Vector2(r, y));
+  const ruby = mesh(new THREE.LatheGeometry(rubyProf, 8), rubyMat, 0, 0, 0, head);
+  {
+    const phi = 0.42, b = mask.scale.y, c = mask.scale.z;
+    const py = b * Math.sin(phi), pz = c * Math.cos(phi);
+    ruby.position.set(0, 0.25 + py, pz + 0.01);
+    ruby.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, py / (b * b), pz / (c * c)).normalize());
   }
-  mesh(new THREE.SphereGeometry(1, 32, 24), black, 0, 3.95, 0, body).scale.set(0.17, 0.12, 0.12);
-  const prof = [[0.13, 3.95], [0.11, 4.4], [0.17, 5.2], [0.2, 5.65], [0.12, 5.85], [0.05, 5.95]].map(([r, y]) => new THREE.Vector2(r, y));
-  mesh(new THREE.LatheGeometry(new THREE.SplineCurve(prof).getPoints(32), 48), black, 0, 0, 0, body).scale.z = 0.6;
-  const neck = mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.6, 16), black, 0, 6.2, 0, body);
 
-  // Head: under the mask there is nothing but darkness — and a ruby.
-  const head = new THREE.Group();
-  head.position.set(0, 6.72, 0);
-  body.add(head);
-  const skull = mesh(new THREE.SphereGeometry(0.26, 48, 32), voidMat, 0, 0, 0, head);
-  skull.scale.set(0.85, 1.15, 0.9);
-  const mask = mesh(new THREE.SphereGeometry(0.3, 48, 32, Math.PI / 2 - 0.65 * Math.PI, 1.3 * Math.PI, 0.05, Math.PI - 0.1), maskMat, 0, 0, 0, skull);
-  const rubyProf = [[0, -0.05], [0.045, 0], [0.034, 0.024], [0, 0.03]].map(([r, y]) => new THREE.Vector2(r, y));
-  const ruby = mesh(new THREE.LatheGeometry(rubyProf, 8), rubyMat, 0, 0.11, 0.21, head); // on his forehead, under the mask
-  ruby.rotation.x = Math.PI / 2;
-
-  // Long arms with long fingers (shoulder and elbow pivots so he can reach his face).
+  // Arms (clavicle > upper arm > forearm > hand > fingers).
   const arms = [];
   for (const sx of [-1, 1]) {
-    const shoulder = new THREE.Group();
-    shoulder.position.set(sx * 0.24, 5.75, 0);
-    shoulder.rotation.z = sx * 0.06;
-    body.add(shoulder);
-    mesh(taperTube(new THREE.CatmullRomCurve3([V(0, 0, 0), V(0, -0.7, 0.02), V(0, -1.4, 0)]), 32, 0.05, 0.035, 12), black, 0, 0, 0, shoulder);
-    const elbow = new THREE.Group();
-    elbow.position.set(0, -1.4, 0);
-    shoulder.add(elbow);
-    mesh(taperTube(new THREE.CatmullRomCurve3([V(0, 0, 0), V(0, -0.65, 0.02), V(0, -1.3, 0)]), 32, 0.035, 0.025, 12), black, 0, 0, 0, elbow);
-    const hand = new THREE.Group();
-    hand.position.set(0, -1.3, 0);
-    elbow.add(hand);
+    const clav = bone(chest, sx * 0.08, FIG.chest - 0.08, 0);
+    seg(clav, 0.0001, 0.05, 0.05); // just the joint ball
+    const upper = bone(clav, sx * 0.24, 0, 0);
+    seg(upper, FIG.upper, 0.05, 0.035);
+    const fore = bone(upper, 0, -FIG.upper, 0);
+    seg(fore, FIG.fore, 0.034, 0.024);
+    const hand = bone(fore, 0, -FIG.fore, 0);
+    mesh(new THREE.SphereGeometry(1, 16, 12), black, 0, -0.08, 0, hand).scale.set(0.055, 0.1, 0.022);
     const fingers = [];
-    for (let f = 0; f < 4; f++) {
-      const fx = (f - 1.5) * 0.025;
-      const fing = new THREE.Group();
-      fing.position.set(fx, 0, 0);
-      hand.add(fing);
-      mesh(taperTube(new THREE.CatmullRomCurve3([V(0, 0, 0), V(fx * 0.5, -0.2, 0.02), V(fx, -0.4, 0.05)]), 16, 0.012, 0.005, 8), black, 0, 0, 0, fing);
-      fingers.push(fing);
+    for (let f = 0; f < 5; f++) {
+      const thumb = f === 4;
+      let parent = bone(hand, thumb ? 0 : (f - 1.5) * 0.026, thumb ? -0.05 : -0.17, thumb ? -0.03 : 0);
+      if (thumb) parent.rotation.set(0.5, 0, 0.5 * -sx);
+      const joints = [parent];
+      const lens = thumb ? [0.12, 0.1, 0.08] : [0.2 - Math.abs(f - 1.5) * 0.02, 0.17, 0.14];
+      seg(parent, lens[0], 0.011, 0.009);
+      for (let j = 1; j < 3; j++) {
+        parent = bone(parent, 0, -lens[j - 1], 0);
+        seg(parent, lens[j], 0.009, j === 2 ? 0.004 : 0.008);
+        joints.push(parent);
+      }
+      fingers.push({ joints, curl: sp(0.15), omega: 1.6 + f * 0.25, base: thumb ? 0.1 : 0.15 + f * 0.04 });
     }
-    arms.push({ shoulder, elbow, hand, fingers });
+    arms.push({ sx, clav, upper, fore, hand, fingers, target: [sp(), sp(), sp()], wrist: sp(0.1), init: false });
   }
 
-  const blocker = mesh(new THREE.CylinderGeometry(0.45, 0.45, 7, 16), new THREE.MeshBasicMaterial(), 0, 3.5, 0, g);
-  blocker.visible = false;
-  collide(blocker);
+  // Legs with knees; feet planted where they stand.
+  const legs = [];
+  for (const sx of [-1, 1]) {
+    const thigh = bone(hips, sx * 0.14, -0.04, 0);
+    seg(thigh, FIG.thigh, 0.075, 0.05);
+    const shin = bone(thigh, 0, -FIG.thigh, 0);
+    seg(shin, FIG.shin, 0.05, 0.034);
+    const foot = bone(shin, 0, -FIG.shin, 0);
+    mesh(new THREE.CapsuleGeometry(0.035, 0.32, 6, 12).rotateX(Math.PI / 2), black, 0, -0.02, 0.14, foot);
+    root.updateMatrixWorld(true);
+    const plant = root.localToWorld(new THREE.Vector3(sx * 0.17, 0, 0.02));
+    plant.y = H(plant.x, plant.z) + 0.05;
+    legs.push({ thigh, shin, foot, plant });
+  }
 
-  const shadow = mesh(new THREE.CircleGeometry(1.4, 48).rotateX(-Math.PI / 2),
-    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false }), x, H(x, z) + 0.06, z);
-  shadow.renderOrder = 1;
-  const murk = new Particles({ count: 160, color: 0x000000, color2: 0x1c1c1c, size: 0.25, grow: 2.2, gravity: -0.35, drag: 0.4 });
+  // Coat: verlet cloth hanging from a ring around the upper chest, open at the front.
+  const K = 11, M = 9, SEG = 0.34;
+  const coat = { K, M, pos: new Float32Array(K * M * 3), prev: new Float32Array(K * M * 3), pins: [], rest: [] };
+  for (let i = 0; i < K; i++) {
+    const a = -2.55 + (5.1 * i) / (K - 1);
+    coat.pins.push(new THREE.Vector3(Math.sin(a) * 0.25, 0.74, -Math.cos(a) * 0.17));
+  }
+  for (let i = 0; i < K - 1; i++) coat.rest.push(coat.pins[i].distanceTo(coat.pins[i + 1]));
+  const cgeo = new THREE.BufferGeometry();
+  cgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(K * M * 3), 3));
+  cgeo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(K * M * 3), 3));
+  const cidx = [];
+  for (let i = 0; i < K - 1; i++) for (let j = 0; j < M - 1; j++) {
+    const a = i * M + j, b = (i + 1) * M + j;
+    cidx.push(a, b, a + 1, a + 1, b, b + 1);
+  }
+  cgeo.setIndex(cidx);
+  const coatMesh = new THREE.Mesh(cgeo, coatMat);
+  coatMesh.frustumCulled = false;
+  ctx.scene.add(coatMesh);
 
-  const mf = { group: g, body, head, skull, mask, ruby, arms, murk, seen: false, revealing: false, headYaw: 0 };
-
-  const hp = V(0, 0, 0);
-  let wispT = 0;
-  every((dt) => {
-    // Barely moves. Just the slow sway — and the head that always turns to follow you.
-    if (!mf.revealing) {
-      body.rotation.z = Math.sin(time * 0.4) * 0.012;
-      const p = ctx.player.position;
-      const want = THREE.MathUtils.clamp(lerpAngle(0, Math.atan2(p.x - g.position.x, p.z - g.position.z) - g.rotation.y, 1), -1.1, 1.1);
-      mf.headYaw += (want - mf.headYaw) * Math.min(1, dt * 0.8);
-      head.rotation.y = mf.headYaw;
-      head.rotation.z = 0.18 + Math.sin(time * 0.3) * 0.04;
-      // Occasional finger twitch.
-      for (const a of arms) a.fingers.forEach((f, i) => { f.rotation.x = Math.max(0, Math.sin(time * 0.7 + i * 1.3)) ** 8 * 0.5; });
-    }
-    wispT -= dt;
-    if (wispT <= 0) {
-      wispT = 0.08;
-      const a = Math.random() * 6.28, h = Math.random() * 6.5;
-      murk.emit(V(g.position.x + Math.cos(a) * 0.25, g.position.y + h, g.position.z + Math.sin(a) * 0.25), V(Math.cos(a) * 0.15, 0.2, Math.sin(a) * 0.15), 2.2);
-    }
+  // Atmosphere: cold rim spotlight from behind, ground fog, drifting dust, soft contact shadow.
+  const away = new THREE.Vector3(-x, 0, -z).normalize(); // toward the meadow; the light sits on the far side
+  const rim = new THREE.SpotLight(0x9cc4ff, 35, 26, 0.42, 0.7, 1.4);
+  rim.position.set(x - away.x * 7, root.position.y + 9, z - away.z * 7);
+  rim.target.position.set(x, root.position.y + 4, z);
+  ctx.scene.add(rim, rim.target);
+  const radial = (key, inner, outer) => canvasTex(key, (g2, s) => {
+    const grd = g2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+    grd.addColorStop(0, inner); grd.addColorStop(1, outer);
+    g2.fillStyle = grd; g2.fillRect(0, 0, s, s);
+  }, 128);
+  const contact = mesh(new THREE.PlaneGeometry(2.6, 2.6).rotateX(-Math.PI / 2),
+    new THREE.MeshBasicMaterial({ map: radial('contact', 'rgba(0,0,0,0.75)', 'rgba(0,0,0,0)'), transparent: true, depthWrite: false }), x, root.position.y + 0.07, z);
+  contact.renderOrder = 1;
+  const fogs = [0, 1].map((i) => {
+    const f = mesh(new THREE.PlaneGeometry(7 + i * 3, 7 + i * 3).rotateX(-Math.PI / 2),
+      new THREE.MeshBasicMaterial({ map: radial('fog', 'rgba(200,206,216,0.55)', 'rgba(200,206,216,0)'), transparent: true, depthWrite: false, opacity: 0.6 - i * 0.2 }),
+      x, root.position.y + 0.25 + i * 0.35, z);
+    f.renderOrder = 2;
+    return f;
   });
+  const dust = new Particles({ count: 120, color: 0xb9c0cc, color2: 0x6f7480, size: 0.18, grow: 1.5, drag: 0.6 });
 
-  ctx.interact.add(g, () => revealMaskedFigure(mf), { distance: 7 });
+  const mf = {
+    group: root, root, hips, spine, chest, neck, head, mask, maskU, ruby, arms, legs, coat, coatMesh, dust, fogs,
+    seen: false, revealing: false, token: 0, done: false,
+    // drive values (sequence sets these; springs smooth them)
+    attend: sp(0), torsoFollow: 0, lookUp: sp(0), handOnHead: 0, handBlend: sp(0), fingerCurl: 0, maskGrow: 0,
+    yaw: { hips: sp(), spine: sp(), chest: sp(), neck: sp(), head: sp() },
+    pitch: { chest: sp(), neck: sp(), head: sp() },
+    cam: null,
+  };
+  resetCoat(mf);
+  ctx.interact.add(root, () => revealMaskedFigure(mf), { distance: 8 });
+  every((dt) => updateFigure(mf, dt));
   return mf;
 }
 
+function resetCoat(mf) {
+  const { coat, chest } = mf;
+  mf.root.updateMatrixWorld(true);
+  for (let i = 0; i < coat.K; i++) {
+    chest.localToWorld(_a.copy(coat.pins[i]));
+    for (let j = 0; j < coat.M; j++) {
+      const o = (i * coat.M + j) * 3;
+      coat.pos[o] = coat.prev[o] = _a.x;
+      coat.pos[o + 1] = coat.prev[o + 1] = _a.y - j * 0.34;
+      coat.pos[o + 2] = coat.prev[o + 2] = _a.z;
+    }
+  }
+}
+
+function updateFigure(mf, dt) {
+  const t = time;
+  const { root, hips, spine, chest, neck, head } = mf;
+  const cam = ctx.camera;
+
+  // ---- where is the player (camera), relative to the figure? ----
+  root.worldToLocal(_a.copy(cam.position));
+  const attend = spring(mf.attend, mf.attending ? 1 : 0, 1.4, dt);
+  const wander = 0.35 * noise(t * 0.12, 4); // unaware: the head drifts slowly, looking at nothing
+  const D = THREE.MathUtils.lerp(wander, Math.atan2(_a.x, _a.z), attend);
+
+  // ---- yaw: distributed down the spine. Lower bones are slower (they follow); the head leads. ----
+  const share = mf.torsoFollow ? THREE.MathUtils.clamp(D * 0.22, -0.45, 0.45) : 0;
+  const Y = mf.yaw;
+  spring(Y.hips, share, 0.7, dt);
+  spring(Y.spine, share, 0.85, dt);
+  spring(Y.chest, share, 1.0, dt);
+  spring(Y.neck, mf.torsoFollow ? D * 0.1 : 0, 1.2, dt);
+  spring(Y.head, THREE.MathUtils.clamp(D - Y.hips.x - Y.spine.x - Y.chest.x - Y.neck.x, -1.15, 1.15), 1.6, dt);
+
+  // ---- pitch: look up at the mouths / down at you ----
+  const up = spring(mf.lookUp, mf.lookingUp ? 1 : 0, 0.9, dt);
+  head.getWorldPosition(_b);
+  const toCam = Math.atan2(_b.y + 0.3 - cam.position.y, Math.hypot(_b.x - cam.position.x, _b.z - cam.position.z));
+  const P = mf.pitch;
+  spring(P.head, -0.78 * up + toCam * 0.8 * attend * (1 - up), 1.1, dt);
+  spring(P.neck, -0.3 * up + toCam * 0.2 * attend * (1 - up), 0.9, dt);
+  spring(P.chest, -0.07 * up, 0.7, dt);
+
+  // ---- idle: breathing, sway, micro-noise (always on) ----
+  const breath = Math.sin(t * 1.55);
+  hips.position.set(0.03 * noise(t * 0.3, 1), FIG.hipY - 0.02 + 0.012 * breath, 0.02 * noise(t * 0.25, 9));
+  hips.rotation.set(0.01 * noise(t * 0.33, 2), Y.hips.x, 0.022 * noise(t * 0.27, 5));
+  spine.rotation.set(0.015 * breath, Y.spine.x, -0.012 * noise(t * 0.29, 6));
+  chest.rotation.set(P.chest.x + 0.02 * breath, Y.chest.x, 0.01 * noise(t * 0.31, 7));
+  chest.scale.set(1 + 0.022 * breath, 1, 1 + 0.03 * breath);
+  neck.rotation.set(P.neck.x + 0.015 * noise(t * 0.5, 8), Y.neck.x, 0.02 * noise(t * 0.4, 10));
+  head.rotation.set(P.head.x + 0.02 * noise(t * 0.7, 3), Y.head.x + 0.02 * noise(t * 0.55, 12), 0.05 + 0.03 * noise(t * 0.6, 2));
+  root.updateMatrixWorld(true);
+
+  // ---- legs: feet planted (2-bone IK every frame, knees forward) ----
+  _front.set(0, 0, 1).transformDirection(root.matrixWorld);
+  for (const L of mf.legs) {
+    ik2(L.thigh, L.shin, FIG.thigh, FIG.shin, L.plant, _front, _front);
+    L.shin.getWorldQuaternion(_qP);
+    root.getWorldQuaternion(_q1);
+    L.foot.quaternion.copy(_qP.invert().multiply(_q1)); // foot stays flat, facing where it was planted
+  }
+
+  // ---- arms: hands trail their shoulders through springs; one can rise to the head ----
+  _cx.setFromMatrixColumn(chest.matrixWorld, 0).normalize();
+  _cy.setFromMatrixColumn(chest.matrixWorld, 1).normalize();
+  _cz.setFromMatrixColumn(chest.matrixWorld, 2).normalize();
+  const blend = spring(mf.handBlend, mf.handOnHead, 1.3, dt);
+  for (const A of mf.arms) {
+    const raising = A.sx === 1 && mf.handOnHead;
+    if (raising) head.localToWorld(_c.set(0.02, 0.6, -0.16));
+    else chest.localToWorld(_c.set(A.sx * 0.4 + 0.02 * noise(t * 0.4, A.sx * 3), -1.86, 0.1 + 0.03 * noise(t * 0.35, A.sx * 5)));
+    root.worldToLocal(_c);
+    const zeta = raising ? 0.62 : 1, om = raising ? 1.25 : 1.6;
+    if (!A.init) { A.target[0].x = _c.x; A.target[1].x = _c.y; A.target[2].x = _c.z; A.init = true; }
+    _d.set(spring(A.target[0], _c.x, om, dt, zeta), spring(A.target[1], _c.y, om, dt, zeta), spring(A.target[2], _c.z, om, dt, zeta));
+    root.localToWorld(_d);
+    const w = A.sx === 1 ? blend : 0;
+    // elbow back & palms in (idle) → elbow out & up, palm down (hand on head)
+    _hint.copy(_cz).multiplyScalar(-1).addScaledVector(_cx, A.sx * 0.35);
+    _hint2.copy(_cx).multiplyScalar(A.sx).addScaledVector(_cy, 0.7).addScaledVector(_cz, -0.25);
+    _hint.lerp(_hint2, w).normalize();
+    _front.copy(_cx).multiplyScalar(A.sx);
+    _front2.copy(_cy);
+    _front.lerp(_front2, w).normalize();
+    ik2(A.upper, A.fore, FIG.upper, FIG.fore, _d, _hint, _front);
+    A.hand.rotation.x = spring(A.wrist, 0.12 + 0.6 * w, 1.5, dt) + 0.03 * noise(t * 0.8, A.sx);
+    for (const F of A.fingers) {
+      const c = spring(F.curl, F.base + (A.sx === 1 ? mf.fingerCurl : 0) * 0.85 + 0.05 * noise(t * 0.9, F.omega * 7), F.omega, dt);
+      for (let j = 0; j < 3; j++) F.joints[j].rotation.x = c * (0.55 + j * 0.15) + (j === 0 && F.joints === A.fingers[4].joints ? 0.5 : 0);
+    }
+  }
+  root.updateMatrixWorld(true);
+
+  // ---- mask ----
+  mf.maskU.uGrow.value = mf.maskGrow;
+  mf.mask.visible = mf.maskGrow > 0.001;
+
+  updateCoat(mf, dt);
+
+  // ---- atmosphere ----
+  for (let i = 0; i < 2; i++) mf.fogs[i].rotation.y = t * (i ? -0.02 : 0.03);
+  if (Math.random() < dt * 5) {
+    const a = Math.random() * 6.28, r = 0.4 + Math.random() * 2.2;
+    _a.set(root.position.x + Math.cos(a) * r, root.position.y + 0.1 + Math.random() * 0.4, root.position.z + Math.sin(a) * r);
+    _b.set(-Math.sin(a) * 0.15, 0.05 + Math.random() * 0.1, Math.cos(a) * 0.15);
+    mf.dust.emit(_a, _b, 4 + Math.random() * 3);
+  }
+
+  if (mf.cam) updateRevealCamera(mf, dt);
+}
+
+function updateCoat(mf, dt) {
+  const { coat, chest, root, coatMesh } = mf;
+  const { K, M, pos, prev } = coat;
+  const h = Math.min(dt, 1 / 30);
+  const damp = 0.985, g = 9.8 * h * h;
+  const wx = 0.4 * noise(time * 0.5, 1) * h * h, wz = 0.3 * noise(time * 0.43, 2) * h * h;
+  hipsW(mf);
+  for (let i = 0; i < K; i++) {
+    chest.localToWorld(_a.copy(coat.pins[i]));
+    const o0 = i * M * 3;
+    pos[o0] = prev[o0] = _a.x; pos[o0 + 1] = prev[o0 + 1] = _a.y; pos[o0 + 2] = prev[o0 + 2] = _a.z;
+    for (let j = 1; j < M; j++) {
+      const o = o0 + j * 3;
+      const vx = (pos[o] - prev[o]) * damp, vy = (pos[o + 1] - prev[o + 1]) * damp, vz = (pos[o + 2] - prev[o + 2]) * damp;
+      prev[o] = pos[o]; prev[o + 1] = pos[o + 1]; prev[o + 2] = pos[o + 2];
+      pos[o] += vx + wx; pos[o + 1] += vy - g; pos[o + 2] += vz + wz;
+    }
+  }
+  for (let it = 0; it < 4; it++) {
+    for (let i = 0; i < K; i++) for (let j = 1; j < M; j++) {          // vertical: hang from the pins
+      const a = (i * M + j - 1) * 3, b = (i * M + j) * 3;
+      constrain(pos, a, b, 0.34, j === 1 ? 1 : 0.5);
+    }
+    for (let i = 0; i < K - 1; i++) for (let j = 1; j < M; j++) {      // across: keep the coat's width (flaring a little)
+      constrain(pos, (i * M + j) * 3, ((i + 1) * M + j) * 3, coat.rest[i] * (1 + j * 0.11), 0.5);
+    }
+    for (let p = 0; p < K * M; p++) {                                   // stay outside the body
+      const o = p * 3;
+      const dx = pos[o] - _hw.x, dz = pos[o + 2] - _hw.z, d = Math.hypot(dx, dz), r = 0.24;
+      if (d < r && pos[o + 1] < _hw.y + 1.6) { const k = r / (d || 1e-4); pos[o] = _hw.x + dx * k; pos[o + 2] = _hw.z + dz * k; }
+      const gy = H(pos[o], pos[o + 2]) + 0.05;
+      if (pos[o + 1] < gy) pos[o + 1] = gy;
+    }
+  }
+  // write geometry + normals (grid finite differences, no allocations)
+  const P = coatMesh.geometry.attributes.position, N = coatMesh.geometry.attributes.normal;
+  P.array.set(pos);
+  const n = N.array;
+  for (let i = 0; i < K; i++) for (let j = 0; j < M; j++) {
+    const o = (i * M + j) * 3;
+    const i0 = (Math.max(0, i - 1) * M + j) * 3, i1 = (Math.min(K - 1, i + 1) * M + j) * 3;
+    const j0 = (i * M + Math.max(0, j - 1)) * 3, j1 = (i * M + Math.min(M - 1, j + 1)) * 3;
+    _a.set(pos[i1] - pos[i0], pos[i1 + 1] - pos[i0 + 1], pos[i1 + 2] - pos[i0 + 2]);
+    _b.set(pos[j1] - pos[j0], pos[j1 + 1] - pos[j0 + 1], pos[j1 + 2] - pos[j0 + 2]);
+    _c.crossVectors(_a, _b).normalize(); // same winding as the triangles (across × down)
+    n[o] = _c.x; n[o + 1] = _c.y; n[o + 2] = _c.z;
+  }
+  P.needsUpdate = N.needsUpdate = true;
+}
+const _hw = new THREE.Vector3();
+function hipsW(mf) { mf.hips.getWorldPosition(_hw); }
+function constrain(pos, a, b, rest, wa) {
+  const dx = pos[b] - pos[a], dy = pos[b + 1] - pos[a + 1], dz = pos[b + 2] - pos[a + 2];
+  const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1e-6;
+  const k = (d - rest) / d;
+  const fa = wa === 1 ? 0 : wa, fb = 1 - fa;
+  pos[a] += dx * k * fa; pos[a + 1] += dy * k * fa; pos[a + 2] += dz * k * fa;
+  pos[b] -= dx * k * fb; pos[b + 1] -= dy * k * fb; pos[b + 2] -= dz * k * fb;
+}
+
 // "He's unfamiliar." — the first time the figure is actually on screen (in view, close enough, not hidden behind a hill).
-const _frustum = new THREE.Frustum(), _pm = new THREE.Matrix4(), _ray = new THREE.Raycaster();
+const _frustum = new THREE.Frustum(), _pm = new THREE.Matrix4(), _ray = new THREE.Raycaster(), _fwd = new THREE.Vector3();
 let sightT = 0;
 function checkFirstSight(mf, dt) {
   if (mf.seen || state !== 'free' || !unlocked) return;
@@ -2390,17 +2714,18 @@ function checkFirstSight(mf, dt) {
   sightT = 0.25;
   const cam = ctx.camera;
   // Aim at his middle: he has to be fairly close and near the centre of the view, not a speck at the edge.
-  const mid = mf.group.position.clone().setY(mf.group.position.y + 3.5);
-  const dist = cam.position.distanceTo(mid);
+  _a.copy(mf.group.position); _a.y += 3.5;
+  const dist = cam.position.distanceTo(_a);
   if (dist > 25) return;
   cam.updateMatrixWorld();
   _frustum.setFromProjectionMatrix(_pm.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse));
-  if (!_frustum.containsPoint(mid)) return;
-  const toMid = mid.clone().sub(cam.position).normalize();
-  if (toMid.dot(V(0, 0, -1).applyQuaternion(cam.quaternion)) < Math.cos(0.5)) return;
-  _ray.set(cam.position, toMid);
+  if (!_frustum.containsPoint(_a)) return;
+  _b.subVectors(_a, cam.position).normalize();
+  if (_b.dot(_fwd.set(0, 0, -1).applyQuaternion(cam.quaternion)) < Math.cos(0.5)) return;
+  _ray.set(cam.position, _b);
   _ray.far = dist - 1;
-  if (_ray.intersectObjects(ctx.player.colliders, false).length) return;
+  _hits.length = 0;
+  if (_ray.intersectObjects(ctx.player.colliders, false, _hits).length) return;
   mf.seen = true;
   sayUnfamiliar(mf);
 }
@@ -2418,158 +2743,149 @@ async function sayUnfamiliar(mf) {
   return mf.lineDone;
 }
 
-// Numerically pose a 2-bone arm so the hand reaches `target` (world). Cheap: done once per pose.
-function solveArm(arm, target) {
-  const sh = arm.shoulder, el = arm.elbow, hp = V(0, 0, 0);
-  const save = [sh.rotation.x, sh.rotation.z, el.rotation.x];
-  const lim = [[-3.3, 0.6], [-1.4, 1.4], [-2.9, 0]];
-  const x = save.slice();
-  const cost = () => {
-    sh.rotation.x = x[0]; sh.rotation.z = x[1]; el.rotation.x = x[2];
-    sh.updateMatrixWorld(true);
-    return arm.hand.getWorldPosition(hp).distanceToSquared(target);
-  };
-  let best = cost();
-  for (let step = 0.5; step > 0.002; step *= 0.6) {
-    let improved = true;
-    while (improved) {
-      improved = false;
-      for (let i = 0; i < 3; i++) {
-        for (const d of [step, -step]) {
-          const old = x[i];
-          x[i] = THREE.MathUtils.clamp(old + d, lim[i][0], lim[i][1]);
-          const c = cost();
-          if (c < best - 1e-7) { best = c; improved = true; } else x[i] = old;
-        }
-      }
-    }
-  }
-  const out = x.slice();
-  [sh.rotation.x, sh.rotation.z, el.rotation.x] = save;
-  sh.updateMatrixWorld(true);
-  return out;
-}
-
-function poseArm(arm, from, to, e) {
-  arm.shoulder.rotation.x = from[0] + (to[0] - from[0]) * e;
-  arm.shoulder.rotation.z = from[1] + (to[1] - from[1]) * e;
-  arm.elbow.rotation.x = from[2] + (to[2] - from[2]) * e;
-}
-
 // True when the ruby covers all four corners of the screen.
 const _corner = new THREE.Raycaster(), _ndc = new THREE.Vector2();
-function rubyFillsScreen(ruby) {
+function rubyFillsScreen(mf) {
   const cam = ctx.camera;
   cam.updateMatrixWorld();
-  for (const [x, y] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
-    _corner.setFromCamera(_ndc.set(x * 0.999, y * 0.999), cam);
-    if (!_corner.intersectObject(ruby, false).length) return false;
+  for (let k = 0; k < 4; k++) {
+    _corner.setFromCamera(_ndc.set(k === 0 || k === 3 ? -0.999 : 0.999, k < 2 ? -0.999 : 0.999), cam);
+    _hits.length = 0;
+    _corner.intersectObject(mf.root, true, _hits); // the ruby is part of the figure: nothing may sit in front of it
+    if (!_hits.length || _hits[0].object !== mf.ruby) return false;
   }
   return true;
+}
+
+// ---- the reveal camera: springs for framing, then a slow eased push into the ruby ----
+const _camT = new THREE.Vector3(), _rubyW = new THREE.Vector3(), _rubyN = new THREE.Vector3(), _end = new THREE.Vector3();
+function updateRevealCamera(mf, dt) {
+  const c = mf.cam, cam = ctx.camera;
+  mf.ruby.getWorldPosition(_rubyW);
+  if (c.push) {
+    const p = smoother(Math.min(1, spring(c.p, 1, 0.5, dt))); // critically damped progress, then smootherstep
+    _rubyN.set(0, 1, 0).transformDirection(mf.ruby.matrixWorld);
+    _end.copy(_rubyW).addScaledVector(_rubyN, Math.max(c.creep, 0.075));
+    cam.position.copy(c.from).lerp(_end, p);
+    cam.fov = c.fov0 + (12 - c.fov0) * p - c.extraZoom;
+    cam.updateProjectionMatrix();
+    cam.lookAt(_rubyW); // dead centre, every frame
+    c.progress = p;
+    return;
+  }
+  // Framing: position and look target each follow their goal through a critically damped spring.
+  mf.head.getWorldPosition(_camT);
+  _camT.lerp(mf.root.position, 0.45 * (1 - mf.lookUp.x));
+  _camT.y += 0.4 * (1 - mf.lookUp.x);
+  cam.position.set(spring(c.px, c.goal.x, 0.9, dt), spring(c.py, c.goal.y, 0.9, dt), spring(c.pz, c.goal.z, 0.9, dt));
+  _b.set(spring(c.lx, _camT.x, 1.1, dt), spring(c.ly, _camT.y, 1.1, dt), spring(c.lz, _camT.z, 1.1, dt));
+  cam.lookAt(_b);
 }
 
 async function revealMaskedFigure(mf) {
   if (busy || state !== 'free' || mf.revealing || !unlocked) return;
   const g = gen;
-  const { player, camera, audio } = ctx;
   if (!mf.seen) { mf.seen = true; sayUnfamiliar(mf); }
   busy = true;
   ctx.interact.enabled = false;
   await mf.lineDone;
   if (!alive(g)) return;
+  runReveal(mf, ++mf.token);
+}
 
-  // ---- The camera locks, and you look up at him. ----
-  player.enabled = false;
+async function runReveal(mf, token) {
+  const g = gen;
+  const ok = () => alive(g) && mf.token === token;
+  const { player, camera, audio } = ctx;
   mf.revealing = true;
-  mf.body.rotation.z = 0;
-  const camPos = camera.position.clone();
-  const q0 = camera.quaternion.clone(), q1 = new THREE.Quaternion(), m4 = new THREE.Matrix4();
-  const rubyPos = () => { mf.group.updateMatrixWorld(true); return mf.ruby.getWorldPosition(V(0, 0, 0)); };
-  const lookQ = (from, at) => q1.setFromRotationMatrix(m4.lookAt(from, at, camera.up));
+  player.enabled = false;
 
-  // His head turns down to face you while your view tilts up to his face (centred on where the ruby is).
-  const h0 = { y: mf.head.rotation.y, z: mf.head.rotation.z, x: mf.head.rotation.x };
-  const hp = mf.head.getWorldPosition(V(0, 0, 0));
-  const yawT = THREE.MathUtils.clamp(lerpAngle(0, Math.atan2(camPos.x - mf.group.position.x, camPos.z - mf.group.position.z) - mf.group.rotation.y, 1), -1.2, 1.2);
-  const pitchT = Math.atan2(hp.y - camPos.y, Math.hypot(hp.x - camPos.x, hp.z - camPos.z));
-  audio.tone(55, 7, { type: 'sine', volume: 0.15 });
-  audio.tone(58, 7, { type: 'sine', volume: 0.1 });
-  await tween(2.2, (t) => {
-    const e = ease(t);
-    mf.head.rotation.set(h0.x + (pitchT - h0.x) * e, h0.y + (yawT - h0.y) * e, h0.z * (1 - e));
-    camera.quaternion.copy(q0).slerp(lookQ(camPos, rubyPos()), e);
-  });
-  if (!alive(g)) return;
-  await wait(0.5);
-  if (!alive(g)) return;
+  // The camera locks: it eases (springs) to a framing spot in front of the figure.
+  const cam = camera.position;
+  _a.set(cam.x - mf.root.position.x, 0, cam.z - mf.root.position.z).normalize();
+  const gx = mf.root.position.x + _a.x * 8.5, gz = mf.root.position.z + _a.z * 8.5;
+  camera.getWorldDirection(_b).multiplyScalar(5).add(cam);
+  mf.cam = {
+    goal: new THREE.Vector3(gx, H(gx, gz) + 2.2, gz),
+    px: sp(cam.x), py: sp(cam.y), pz: sp(cam.z), lx: sp(_b.x), ly: sp(_b.y), lz: sp(_b.z),
+    push: false, p: sp(0), from: new THREE.Vector3(), fov0: camera.fov, creep: 0.12, extraZoom: 0, progress: 0,
+  };
+  audio.tone(55, 9, { type: 'sine', volume: 0.13 });
+  audio.tone(58, 9, { type: 'sine', volume: 0.09 });
 
-  // ---- He slowly lays one long hand on top of his head... ----
-  const arm = mf.arms[0];
-  const crown = (dx, dy, dz) => mf.head.localToWorld(V(dx, dy, dz));
-  mf.group.updateMatrixWorld(true);
-  const rest = [arm.shoulder.rotation.x, arm.shoulder.rotation.z, arm.elbow.rotation.x];
-  const onHead = solveArm(arm, crown(0, 0.48, -0.04));
-  await tween(2.8, (t) => {
-    const e = ease(t);
-    poseArm(arm, rest, onHead, e);
-    arm.fingers.forEach((f) => { f.rotation.x = 1.1 * e; }); // fingers curl down over the crown
-    camera.quaternion.copy(lookQ(camPos, rubyPos()));
-  });
-  if (!alive(g)) return;
-  await wait(0.8);
-  if (!alive(g)) return;
+  // 1. It notices you: the head turns first...
+  await wait(0.6); if (!ok()) return;
+  mf.attending = true;
+  await wait(1.3); if (!ok()) return;
+  // ...then the torso slowly follows (the head counter-rotates to stay on you).
+  mf.torsoFollow = 1;
+  await wait(2.8); if (!ok()) return;
 
-  // ---- ...and lifts the black mask up and off. Nothing beneath but darkness, and a ruby. ----
-  arm.hand.attach(mf.mask);
-  audio.noise(0.4, { volume: 0.05 });
-  const lifted = solveArm(arm, crown(-0.55, 1.1, 0.35));
-  await tween(2.4, (t) => {
-    poseArm(arm, onHead, lifted, ease(t));
-    camera.quaternion.copy(lookQ(camPos, rubyPos()));
-  });
-  if (!alive(g)) return;
-  const lowered = [0.15, -0.38, -0.35];
-  await tween(1.8, (t) => {
-    poseArm(arm, lifted, lowered, ease(t));
-    arm.fingers.forEach((f) => { f.rotation.x = 1.1 - 0.5 * ease(t); });
-    camera.quaternion.copy(lookQ(camPos, rubyPos()));
-  });
-  if (!alive(g)) return;
-  await wait(1.0);
-  if (!alive(g)) return;
+  // 2. The head tilts back and looks up.
+  mf.lookingUp = true;
+  await wait(3.0); if (!ok()) return;
 
-  // ---- The ruby stays dead centre while the camera closes in, until it covers all four corners. ----
-  const facing = V(0, 1, 0).transformDirection(mf.ruby.matrixWorld); // the gem's table faces out of his forehead
-  const fov0 = camera.fov;
-  const at = (d) => rubyPos().addScaledVector(facing, d);
-  const start = camPos.clone();
+  // 3. One hand rises slowly, overshoots a touch, and settles on top of its head; the fingers curl.
+  mf.handOnHead = 1;
+  audio.tone(41, 5, { type: 'sine', volume: 0.1 });
+  await wait(3.6); if (!ok()) return;
+  mf.fingerCurl = 1;
+  await wait(1.6); if (!ok()) return;
+
+  // 4. A black mask forms over the face, growing out from the centre. The head comes down to stare at you.
+  mf.lookingUp = false;
+  audio.noise(3, { volume: 0.04 });
+  await tween(4.0, (t) => { mf.maskGrow = smoother(t); });
+  if (!ok()) return;
+  await wait(1.2); if (!ok()) return;
+
+  // 5. The camera slowly pushes in to the ruby until it covers all four corners of the screen.
+  const c = mf.cam;
+  c.from.copy(camera.position);
+  c.fov0 = camera.fov;
+  c.p = sp(0);
+  c.push = true;
   let covered = false;
-  for (let t = 0; t < 1 && !covered;) {
-    t = Math.min(1, t + (await nextFrame()) / 4.2);
-    if (!alive(g)) return;
-    const e = ease(t);
-    camera.position.lerpVectors(start, at(0.12), e);
-    camera.fov = fov0 + (12 - fov0) * e;
-    camera.updateProjectionMatrix();
-    camera.lookAt(rubyPos());
-    covered = t > 0.5 && rubyFillsScreen(mf.ruby);
-  }
-  // Very wide screens may need a little more: keep creeping in (and narrowing) until every corner is ruby.
-  let d = camera.position.distanceTo(rubyPos());
-  for (let i = 0; i < 120 && !covered; i++) {
-    await nextFrame();
-    if (!alive(g)) return;
-    d = Math.max(0.075, d * 0.985);
-    camera.position.copy(at(d));
-    camera.fov = Math.max(5, camera.fov * 0.99);
-    camera.updateProjectionMatrix();
-    camera.lookAt(rubyPos());
-    covered = rubyFillsScreen(mf.ruby);
+  for (let i = 0; i < 2000 && !covered; i++) {
+    await nextFrame(); if (!ok()) return;
+    covered = c.progress > 0.6 && rubyFillsScreen(mf);
+    if (c.progress > 0.995 && !covered) { c.creep *= 0.985; c.extraZoom = Math.min(6, c.extraZoom + 0.05); } // very wide screens
   }
   mf.coveredAtEnd = covered;
-  await wait(0.5);
-  if (!alive(g)) return;
+  await wait(0.6); if (!ok()) return;
+  mf.done = true;
   ctx.goTo(NEXT);
+}
+
+function resetFigure(mf) {
+  mf.token++;
+  mf.revealing = false; mf.attending = false; mf.torsoFollow = 0; mf.lookingUp = false;
+  mf.handOnHead = 0; mf.fingerCurl = 0; mf.maskGrow = 0; mf.cam = null; mf.done = false;
+  for (const s of [mf.attend, mf.lookUp, mf.handBlend, ...Object.values(mf.yaw), ...Object.values(mf.pitch)]) { s.x = 0; s.v = 0; }
+  for (const A of mf.arms) { A.init = false; A.wrist.x = 0.1; A.wrist.v = 0; for (const F of A.fingers) { F.curl.x = F.base; F.curl.v = 0; } }
+}
+
+/** ?debug R: replay the reveal from the very start, standing in front of the figure. */
+function replayReveal() {
+  const mf = masked;
+  if (!mf || !ctx || mf.done) return;
+  resetFigure(mf);
+  if (!unlocked) openHedge();
+  ctx.dialogue.clear();
+  const { player, camera } = ctx;
+  camera.fov = 75;
+  camera.updateProjectionMatrix();
+  const x = SPOTS.masked[0], z = SPOTS.masked[1] + 8.5; // in front, on the valley side
+  player.position.set(x, H(x, z), z);
+  player.velocity.set(0, 0, 0);
+  player.yaw = 0;
+  player.pitch = 0.32;
+  player.enabled = true;
+  mf.seen = true;
+  busy = true;
+  ctx.interact.enabled = false;
+  resetCoat(mf);
+  runReveal(mf, mf.token);
 }
 
 function setupShadows() {
@@ -2615,7 +2931,12 @@ export default {
     });
     document.body.appendChild(progressEl);
     if (new URLSearchParams(location.search).has('debug')) {
-      onDebugKey = (e) => { if (e.code === 'KeyU' && ctx) openHedge(); }; // ?debug: U unlocks the final route
+      // ?debug: U unlocks the final route; R replays the masked figure's reveal from the start.
+      onDebugKey = (e) => {
+        if (!ctx || e.repeat) return;
+        if (e.code === 'KeyU') openHedge();
+        if (e.code === 'KeyR') replayReveal();
+      };
       window.addEventListener('keydown', onDebugKey);
     }
     setupShadows();
