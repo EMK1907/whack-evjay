@@ -8,12 +8,15 @@ import * as THREE from 'three';
 //      the dark red city, the candy world, the white conveyor world and thousands more, drifting slowly.
 //   4. The screen turns completely black.
 //   5. A deep voice says exactly: "You will forever be in this loop, you cannot escape" (+ low rumble, subtitle).
+//      The voice is Varshan's recording at assets/audio/voice.(m4a|mp3|wav); speech synthesis is only the fallback.
 //   6. Hold on black, then a small "LOOP" title. The game ends.
 // ?debug: R restarts the ending.
 
 const NAME = 'ending';
 const LINE = 'You will forever be in this loop, you cannot escape';
 const PULL_SEC = 13;
+const VOICE_FILES = ['assets/audio/voice.m4a', 'assets/audio/voice.mp3', 'assets/audio/voice.wav'];
+const VOICE_RATE = 1.0; // < 1 slows the recording and drops its pitch (e.g. 0.9 for a deeper, heavier voice)
 
 let ctx = null;
 let gen = 0;
@@ -26,6 +29,7 @@ let pull = 0;       // 0–1: progress of the pull-back
 let gem = null, ruby = null, core = null, rays = null, glints = [], beacon = null;
 let uniforms = null, field = null, path = null, stars = null, sky = null;
 let ui = null, subEl = null, titleEl = null, onKey = null;
+let voiceEl = null; // the recorded voice line, if one was found
 
 const alive = (g) => ctx !== null && g === gen;
 const smoother = (t) => t * t * t * (t * (t * 6 - 15) + 10);
@@ -501,6 +505,49 @@ function speak(text, onWord) {
   });
 }
 
+// Find the first recording that exists and preload it.
+async function loadVoice(g) {
+  for (const url of VOICE_FILES) {
+    try {
+      const r = await fetch(url, { method: 'HEAD' });
+      if (!r.ok || !alive(g)) continue;
+      const el = new Audio(url);
+      el.preload = 'auto';
+      el.preservesPitch = false;
+      el.playbackRate = VOICE_RATE;
+      voiceEl = el;
+      return;
+    } catch {}
+  }
+}
+
+// Play the recording; words appear in step with how far through the clip we are (weighted by word length).
+function playVoice(words, show) {
+  return new Promise((resolve) => {
+    const el = voiceEl;
+    let done = false;
+    const fin = () => { if (!done) { done = true; show(words.length - 1); resolve(); } };
+    const total = LINE.replace(/ /g, '').length;
+    const starts = [];
+    let acc = 0;
+    for (const w of LINE.split(' ')) { starts.push(acc / total); acc += w.length; }
+    el.onended = fin; el.onerror = fin;
+    tasks.push(() => {
+      if (done) return false;
+      if (el.duration > 0) {
+        const t = el.currentTime / el.duration;
+        let i = -1;
+        while (i + 1 < starts.length && starts[i + 1] * 0.92 <= t) i++;
+        show(i);
+      }
+      return true;
+    });
+    el.currentTime = 0;
+    el.play().catch(fin);
+    setTimeout(fin, 15000);
+  });
+}
+
 function rumble(audio) {
   audio.tone(31, 7, { type: 'sine', volume: 0.3 });
   audio.tone(32.7, 7, { type: 'sine', volume: 0.22 });
@@ -552,9 +599,13 @@ async function run(g) {
   // Each word fades in as it is spoken (speech word boundaries), with a steady schedule as the fallback.
   let shown = -1;
   const show = (i) => { while (shown < Math.min(i, words.length - 1)) words[++shown].classList.add('on'); };
-  words.forEach((_, i) => setTimeout(() => { if (alive(g)) show(i); }, 300 + i * 430));
-  const onWord = (charIndex) => { if (alive(g)) show(LINE.slice(0, charIndex).split(' ').length - 1); };
-  await Promise.all([speak(LINE, onWord), wait(words.length * 0.43 + 1.2)]);
+  if (voiceEl) {
+    await playVoice(words, show);
+  } else {
+    words.forEach((_, i) => setTimeout(() => { if (alive(g)) show(i); }, 300 + i * 430));
+    const onWord = (charIndex) => { if (alive(g)) show(LINE.slice(0, charIndex).split(' ').length - 1); };
+    await Promise.all([speak(LINE, onWord), wait(words.length * 0.43 + 1.2)]);
+  }
   if (!alive(g)) return;
   show(words.length - 1);
   await wait(2.6); if (!alive(g)) return;
@@ -591,6 +642,8 @@ export default {
     buildRuby();
     buildWorlds();
     buildUI();
+    voiceEl = null;
+    loadVoice(g);
 
     if (new URLSearchParams(location.search).has('debug')) {
       onKey = (e) => { if (ctx && !e.repeat && e.code === 'KeyR') ctx.goTo(NAME); };
@@ -663,6 +716,8 @@ export default {
     gen++;
     tasks = [];
     try { window.speechSynthesis?.cancel(); } catch {}
+    if (voiceEl) { voiceEl.pause(); voiceEl.onended = voiceEl.onerror = null; }
+    voiceEl = null;
     ui?.remove();
     ui = subEl = titleEl = null;
     if (onKey) window.removeEventListener('keydown', onKey);

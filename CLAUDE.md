@@ -39,8 +39,8 @@ First-person 3D browser game in Three.js. Full spec: docs/GAME.md — follow it 
 
 ## Ownership — only edit files you own
 - Emir: src/main.js, src/core/player.js, src/core/interact.js, src/core/audio.js, src/scenes/inverted.js
-- Varshan: src/core/dialogue.js, src/scenes/quirkland.js
-- Joshua: src/core/effects.js, src/scenes/conveyor.js, ending.js
+- Varshan: src/core/dialogue.js, src/scenes/quirkland.js, src/scenes/ending.js (+ assets/audio/voice.*)
+- Joshua: src/core/effects.js, src/scenes/conveyor.js
 - Need a change in someone else's file? Stop and tell the user instead of editing it.
 
 ## Git
