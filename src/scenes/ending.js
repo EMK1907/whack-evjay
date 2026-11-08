@@ -4,8 +4,9 @@ import * as THREE from 'three';
 // Picks up exactly where Quirkland leaves off: the masked figure's ruby fills the screen.
 //   1. The ruby begins to shine — a deep red glow builds inside it, light rays and glints break off its facets.
 //   2. The error effect from the start of the game returns (ctx.effects.error).
-//   3. Under the glitch the camera pulls back, up into a bird's-eye view of an infinite number of worlds —
-//      the dark red city, the candy world, the white conveyor world and thousands more, drifting slowly.
+//   3. Under the glitch the camera pulls back, up into a bird's-eye view of an infinite void full of specks —
+//      every speck a world (the dark red city, the candy world, the white conveyor world, and countless more),
+//      drifting over an icy vortex: the loop itself.
 //   4. The screen turns completely black.
 //   5. A deep voice says exactly: "You will forever be in this loop, you cannot escape" (+ low rumble, subtitle).
 //      The voice is Varshan's recording at assets/audio/voice.(m4a|mp3|wav); speech synthesis is only the fallback.
@@ -27,7 +28,7 @@ let shine = 0;      // 0–1: how hard the ruby is glowing
 let camDist = 1.6;  // gem-mode camera distance
 let pull = 0;       // 0–1: progress of the pull-back
 let gem = null, ruby = null, core = null, rays = null, glints = [], beacon = null;
-let uniforms = null, field = null, path = null, stars = null, sky = null;
+let uniforms = null, field = null, path = null, stars = null, sky = null, vortex = null;
 let ui = null, subEl = null, titleEl = null, onKey = null;
 let voiceEl = null; // the recorded voice line, if one was found
 
@@ -35,7 +36,7 @@ const alive = (g) => ctx !== null && g === gen;
 const smoother = (t) => t * t * t * (t * (t * 6 - 15) + 10);
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 const _look = new THREE.Vector3(), _dir = new THREE.Vector3(), _tmp = new THREE.Vector3();
-const LOOK_END = V(0, -60, -320);
+const LOOK_END = V(-60, -200, -520); // down over the specks, the vortex below
 
 function tween(sec, fn) {
   return new Promise((resolve) => {
@@ -161,27 +162,7 @@ function buildRuby() {
   ctx.scene.add(beacon);
 }
 
-// ---------- 3. the infinite worlds ----------
-const PLANET_VERT = `
-  attribute float aKind; attribute vec3 aColA; attribute vec3 aColB; attribute float aSeed;
-  uniform float uTime;
-  varying vec3 vN; varying vec3 vP; varying vec3 vW; varying vec3 vA; varying vec3 vB; varying float vKind; varying float vSeed; varying float vDist;
-  void main() {
-    mat4 M = modelMatrix;
-    #ifdef USE_INSTANCING
-      M = M * instanceMatrix;
-    #endif
-    float a = uTime * (0.03 + aSeed * 0.12) + aSeed * 40.0;   // each world spins on its axis
-    mat3 R = mat3(cos(a), 0.0, -sin(a), 0.0, 1.0, 0.0, sin(a), 0.0, cos(a));
-    vP = R * normalize(position);
-    vec4 w = M * vec4(position, 1.0);
-    vW = w.xyz;
-    vN = normalize(mat3(M) * position);
-    vA = aColA; vB = aColB; vKind = aKind; vSeed = aSeed;
-    vec4 mv = viewMatrix * w;
-    vDist = -mv.z;
-    gl_Position = projectionMatrix * mv;
-  }`;
+// ---------- 3. the infinite worlds: a void full of specks, each one a world ----------
 const NOISE = `
   float hash(vec3 p) { p = fract(p * 0.3183099 + 0.1); p *= 17.0; return fract(p.x * p.y * p.z * (p.x + p.y + p.z)); }
   float noise(vec3 x) {
@@ -189,73 +170,108 @@ const NOISE = `
     return mix(mix(mix(hash(i), hash(i + vec3(1,0,0)), f.x), mix(hash(i + vec3(0,1,0)), hash(i + vec3(1,1,0)), f.x), f.y),
                mix(mix(hash(i + vec3(0,0,1)), hash(i + vec3(1,0,1)), f.x), mix(hash(i + vec3(0,1,1)), hash(i + vec3(1,1,1)), f.x), f.y), f.z);
   }
-  float fbm(vec3 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 4; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }`;
-const PLANET_FRAG = `
-  uniform float uTime; uniform vec3 uSun;
-  varying vec3 vN; varying vec3 vP; varying vec3 vW; varying vec3 vA; varying vec3 vB; varying float vKind; varying float vSeed; varying float vDist;
-  ${NOISE}
+  float fbm(vec3 p) { float a = 0.5, s = 0.0; for (int i = 0; i < 5; i++) { s += a * noise(p); p *= 2.03; a *= 0.5; } return s; }`;
+
+// Every world is a glowing speck: a hot core, a soft halo, and for some a faint ring or a twin.
+const SPECK_VERT = `
+  attribute float size; attribute float kind; attribute float seed;
+  uniform float uScale; uniform float uTime;
+  varying vec3 vC; varying float vK; varying float vTw; varying float vFade;
   void main() {
-    vec3 N = normalize(vN), Vd = normalize(cameraPosition - vW), L = normalize(uSun);
-    float ndl = dot(N, L), dif = max(ndl, 0.0), night = smoothstep(0.15, -0.3, ndl);
-    float fr = pow(1.0 - max(dot(N, Vd), 0.0), 3.0);
-    vec3 p = vP; float s = vSeed * 13.0;
-    vec3 surf, emis = vec3(0.0);
-    int k = int(vKind + 0.5);
-    if (k == 0) {            // dark red city world (the inverted city): rust continents, glowing streets
-      float n = fbm(p * 3.0 + s);
-      surf = mix(vA * 0.25, vA * 0.7, n);
-      float lit = step(0.84, hash(floor(p * 52.0) + s)) * smoothstep(0.38, 0.6, fbm(p * 5.0 + s));
-      emis = vB * lit * (0.5 + 3.0 * night);
-    } else if (k == 1) {     // bright candy world (Quirkland): swirled stripes, sugar speckles
-      float b = sin(p.y * 10.0 + fbm(p * 2.5 + s) * 4.0 + atan(p.z, p.x) * 2.0);
-      surf = mix(vA, vB, smoothstep(-0.25, 0.25, b));
-      surf = mix(surf, vec3(1.0), smoothstep(0.8, 0.88, noise(p * 10.0 + s)) * 0.8);
-      emis = surf * 0.06;
-    } else if (k == 2) {     // gas giant: turbulent bands and a storm eye
-      float lat = p.y + (fbm(p * vec3(2.0, 7.0, 2.0) + s) - 0.5) * 0.3;
-      surf = mix(vA, vB, 0.5 + 0.5 * sin(lat * 19.0 + s));
-      surf *= 0.85 + 0.3 * fbm(p * 9.0 + s);
-      float eye = 1.0 - smoothstep(0.0, 0.18, length(p - normalize(vec3(0.7, -0.25, 0.6))));
-      surf = mix(surf, vB * 1.4, eye * 0.7);
-    } else if (k == 3) {     // ocean world with continents, ice caps and city lights on the night side
-      float n = fbm(p * 2.2 + s);
-      float land = smoothstep(0.5, 0.53, n);
-      surf = mix(vB, vA * (0.6 + 0.6 * fbm(p * 8.0 + s)), land);
-      surf = mix(surf, vec3(0.92), smoothstep(0.78, 0.95, abs(p.y)));
-      emis = vec3(1.0, 0.7, 0.35) * step(0.9, hash(floor(p * 64.0) + s)) * land * night * 1.6;
-    } else if (k == 4) {     // white/ice world (the conveyor world): pale, faceted glow at the rim
-      float n = fbm(p * 4.0 + s);
-      surf = mix(vA, vB, n);
-      emis = vA * fr * 0.3;
-    } else {                 // lava world: black crust, glowing cracks
-      float n = fbm(p * 3.5 + s);
-      surf = vec3(0.05, 0.025, 0.02) * (0.5 + n);
-      emis = vA * (1.0 - smoothstep(0.0, 0.045, abs(n - 0.5))) * 3.5;
-    }
-    vec3 col = surf * (0.03 + dif * 0.95) + emis;
-    col += mix(vA, vec3(1.0), 0.25) * fr * (0.2 + 0.8 * dif) * 0.75;   // atmosphere rim
-    col *= smoothstep(3400.0, 500.0, vDist);                              // the far worlds fade into the dark
-    gl_FragColor = vec4(col, 1.0);
+    vC = color; vK = kind;
+    vec4 mv = modelViewMatrix * vec4(position, 1.0);
+    float d = max(1.0, -mv.z);
+    vTw = 0.7 + 0.3 * sin(uTime * (0.6 + seed * 2.0) + seed * 40.0);
+    vFade = smoothstep(5200.0, 900.0, d);
+    gl_PointSize = clamp(size * uScale / d, 2.4, 96.0);
+    gl_Position = projectionMatrix * mv;
+  }`;
+const SPECK_FRAG = `
+  varying vec3 vC; varying float vK; varying float vTw; varying float vFade;
+  void main() {
+    vec2 q = gl_PointCoord - 0.5;
+    float d = length(q);
+    if (d > 0.5) discard;
+    float core = smoothstep(0.16, 0.0, d);
+    float halo = exp(-d * d * 30.0);
+    float ring = vK > 0.5 && vK < 1.5 ? exp(-pow((d - 0.33) / 0.035, 2.0)) * 0.6 : 0.0;
+    float twin = vK > 1.5 ? smoothstep(0.07, 0.0, length(q - vec2(0.22, -0.12))) : 0.0;
+    vec3 c = vC * (halo * 1.1 + ring * 1.3 + twin * 1.6) + mix(vC, vec3(1.0), 0.45) * core * 2.4;
+    gl_FragColor = vec4(c * vTw * vFade, 1.0);
     #include <colorspace_fragment>
   }`;
 
-function planetMaterial() {
-  return new THREE.ShaderMaterial({ uniforms, vertexShader: PLANET_VERT, fragmentShader: PLANET_FRAG });
+// The void below: an icy vortex (the loop), mist pouring off it, ink blots and white splatter.
+const VORTEX_FRAG = `
+  uniform float uTime; varying vec2 vUv;
+  ${NOISE}
+  void main() {
+    vec2 p = (vUv - 0.5) * 2.0;            // -1..1 across the plane
+    vec2 v = p * 2.6;                      // vortex space (ring at r ≈ 0.42)
+    float r = length(v), a = atan(v.y, v.x);
+    float sw = a + 1.6 / (r + 0.12) - uTime * 0.12;               // spiral arms wind into the hole
+    vec3 sp = vec3(cos(sw) * r * 5.0, sin(sw) * r * 5.0, uTime * 0.04);
+    float streak = fbm(sp), fine = fbm(sp * 3.0 + 9.0);
+    float rim = exp(-pow((r - 0.42) / 0.035, 2.0));
+    float rim2 = exp(-pow((r - 0.56) / 0.06, 2.0)) * 0.45;
+    float disk = smoothstep(0.24, 0.32, r) * (1.0 - smoothstep(0.5, 0.95, r));
+    float halo = exp(-pow((r - 0.45) / 0.3, 2.0));
+    float hole = 1.0 - smoothstep(0.2, 0.26, r);
+    vec3 ice = vec3(0.22, 0.48, 1.0), pale = vec3(0.7, 0.88, 1.0);
+    vec3 col = ice * (rim * 1.5 + rim2 * 0.6 + halo * 0.18) + mix(ice, pale, fine) * disk * pow(streak, 2.0) * 0.95;
+    col += pale * pow(fine, 7.0) * disk * 2.2;                    // bright sparkling filaments
+    // mist plume streaming off to one side, like smoke
+    vec2 m = vec2(p.x * 1.6 - 0.25, p.y * 3.4);
+    float plume = fbm(vec3(m * 2.4 + vec2(-uTime * 0.03, 0.0), 2.0)) * smoothstep(-0.1, 0.5, p.x) * exp(-m.y * m.y * 1.5) * (1.0 - smoothstep(0.6, 1.0, length(p)));
+    col += ice * 0.3 * smoothstep(0.4, 0.85, plume);
+    // black ink blots clinging to the ring
+    float blotMask = smoothstep(0.55, 0.7, noise(vec3(a * 1.3, 3.0, 1.0))) * smoothstep(0.28, 0.36, r) * (1.0 - smoothstep(0.6, 0.72, r));
+    float blot = smoothstep(0.6, 0.64, fbm(vec3(v * 7.0, 5.0))) * blotMask;
+    // white splatter thrown out to the far side
+    float splMask = smoothstep(0.2, 0.45, p.x - p.y * 0.6) * (1.0 - smoothstep(0.2, 0.42, length(p - vec2(0.33, -0.2))));
+    float splat = smoothstep(0.66, 0.69, fbm(vec3(p * 9.0, 11.0))) * splMask;
+    col = mix(col, vec3(0.0), blot);
+    col = mix(col, vec3(1.0), splat);
+    col *= 1.0 - hole;
+    float alpha = clamp(max(max(hole, blot), max(splat, length(col) * 0.9)), 0.0, 1.0) * (1.0 - smoothstep(0.85, 1.0, length(p)));
+    gl_FragColor = vec4(col, alpha);
+    #include <colorspace_fragment>
+  }`;
+
+const WORLD_COLS = [
+  [0.16, [1.0, 0.16, 0.12]],   // dark red cities
+  [0.12, [1.0, 0.45, 0.78]],   // candy worlds
+  [0.14, [1.0, 1.0, 1.0]],     // white worlds
+  [0.22, [0.5, 0.78, 1.0]],    // ice-blue worlds
+  [0.12, [0.35, 0.55, 1.0]],   // deep blue
+  [0.09, [1.0, 0.78, 0.4]],    // gold
+  [0.08, [0.72, 0.5, 1.0]],    // violet
+  [0.07, [0.45, 1.0, 0.85]],   // mint
+];
+function pickCol(r) {
+  let a = 0;
+  for (const [w, c] of WORLD_COLS) { a += w; if (r < a) return c; }
+  return WORLD_COLS[0][1];
 }
 
-const KINDS = [
-  // [weight, colour A choices, colour B choices]
-  [0.2, [0x8a0f12, 0x6e0c18, 0x9c1a0e], [0xff3a1e, 0xff5530]],          // dark red city
-  [0.2, [0xff8fc8, 0xffb347, 0x9fd8ff, 0xc9a7ff], [0xffffff, 0x9ff0d0, 0xfff07a]], // candy
-  [0.18, [0xd9a066, 0x6d7cff, 0xc4b27a, 0x9e5bd8], [0xf3e1c0, 0x2b2f7a, 0x6e5530, 0xffd0f0]], // gas giant
-  [0.16, [0x5aa64a, 0xb08850, 0x7a9a40], [0x0d3a7a, 0x0a4e6e]],          // ocean world
-  [0.14, [0xbfe6ff, 0xffffff, 0xd8d8e8], [0x7aa0c8, 0xb8c0d0]],          // ice / white
-  [0.12, [0xff5a14, 0xff2a0a], [0x000000]],                              // lava
-];
-function pickKind(r) {
-  let a = 0;
-  for (let i = 0; i < KINDS.length; i++) { a += KINDS[i][0]; if (r < a) return i; }
-  return 0;
+function speckPoints(list) {
+  const n = list.length;
+  const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), size = new Float32Array(n), kind = new Float32Array(n), seed = new Float32Array(n);
+  list.forEach((w, i) => {
+    pos.set(w.p, i * 3); col.set(w.c, i * 3); size[i] = w.s; kind[i] = w.k; seed[i] = w.seed;
+  });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
+  geo.setAttribute('kind', new THREE.BufferAttribute(kind, 1));
+  geo.setAttribute('seed', new THREE.BufferAttribute(seed, 1));
+  const pts = new THREE.Points(geo, new THREE.ShaderMaterial({
+    uniforms, vertexShader: SPECK_VERT, fragmentShader: SPECK_FRAG, vertexColors: true,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+  }));
+  pts.frustumCulled = false;
+  return pts;
 }
 
 function buildWorlds() {
@@ -263,130 +279,85 @@ function buildWorlds() {
   field = new THREE.Group();
   ctx.scene.add(field);
 
-  // The camera's flight path (ruby → high bird's-eye) — keep worlds out of its way.
+  // The camera's flight path (ruby → high bird's-eye) — keep specks from sitting right on the lens.
   path = new THREE.CatmullRomCurve3([V(0, 0, 4), V(3, 3, 17), V(20, 28, 62), V(45, 120, 160), V(0, 360, 250)], false, 'centripetal');
-  const pathPts = path.getSpacedPoints(80);
+  const pathPts = path.getSpacedPoints(60);
+  const nearPath = (x, y, z, r) => pathPts.some((p) => (p.x - x) ** 2 + (p.y - y) ** 2 + (p.z - z) ** 2 < r * r);
 
-  const makeSet = (geo, list) => {
-    const n = list.length;
-    const mesh = new THREE.InstancedMesh(geo, planetMaterial(), n);
-    const kind = new Float32Array(n), ca = new Float32Array(n * 3), cb = new Float32Array(n * 3), seed = new Float32Array(n);
-    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), c = new THREE.Color();
-    list.forEach((w, i) => {
-      q.setFromEuler(e.set(w.tilt, 0, w.tilt * 0.6));
-      mesh.setMatrixAt(i, m4.compose(w.pos, q, V(w.r, w.r, w.r)));
-      kind[i] = w.kind; seed[i] = w.seed;
-      c.set(w.a); ca.set([c.r, c.g, c.b], i * 3);
-      c.set(w.b); cb.set([c.r, c.g, c.b], i * 3);
-    });
-    geo.setAttribute('aKind', new THREE.InstancedBufferAttribute(kind, 1));
-    geo.setAttribute('aColA', new THREE.InstancedBufferAttribute(ca, 3));
-    geo.setAttribute('aColB', new THREE.InstancedBufferAttribute(cb, 3));
-    geo.setAttribute('aSeed', new THREE.InstancedBufferAttribute(seed, 1));
-    mesh.frustumCulled = false;
-    field.add(mesh);
-    return mesh;
-  };
-
-  // Hero worlds right beside the ruby: the places this game has been.
-  const heroes = [
-    { pos: V(15, -4, -13), r: 6, kind: 0, a: 0x8a0f12, b: 0xff3a1e, tilt: 0.3, seed: 0.21 },   // the dark red city
-    { pos: V(-14, 3, -21), r: 5, kind: 1, a: 0xff8fc8, b: 0x9ff0d0, tilt: -0.25, seed: 0.57 }, // the candy world
-    { pos: V(5, 8, -36), r: 3.6, kind: 4, a: 0xffffff, b: 0xb8c0d0, tilt: 0.1, seed: 0.83 },   // the white conveyor world
-    { pos: V(-6, -9, -55), r: 9, kind: 2, a: 0x9e5bd8, b: 0xffd0f0, tilt: 0.5, seed: 0.34 },
-  ];
-  makeSet(new THREE.SphereGeometry(1, 96, 64), heroes);
-
-  // A candy-striped ring round the candy world.
-  const ring = new THREE.Mesh(new THREE.RingGeometry(1.45, 2.35, 160, 1), new THREE.ShaderMaterial({
-    transparent: true, side: THREE.DoubleSide, depthWrite: false,
-    vertexShader: 'varying vec3 vP; void main() { vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-    fragmentShader: `varying vec3 vP;
-      void main() {
-        float r = length(vP.xy);
-        float band = step(0.5, fract(r * 7.0));
-        vec3 c = mix(vec3(1.0, 0.32, 0.6), vec3(1.0, 0.95, 0.97), band);
-        float a = smoothstep(1.45, 1.55, r) * (1.0 - smoothstep(2.2, 2.35, r)) * 0.85;
-        gl_FragColor = vec4(c * 0.9, a);
-        #include <colorspace_fragment>
-      }`,
-  }));
-  ring.position.copy(heroes[1].pos);
-  ring.scale.setScalar(heroes[1].r);
-  ring.rotation.set(-Math.PI / 2 + 0.45, 0.2, 0);
-  field.add(ring);
-
-  // Thousands more, out to the horizon.
-  const crowd = [];
-  for (let tries = 0; crowd.length < 3600 && tries < 20000; tries++) {
-    const ang = rnd() * Math.PI * 2, dist = 70 + Math.pow(rnd(), 1.4) * 2900;
+  const list = [];
+  // The worlds this game has been through, right beside the ruby.
+  list.push({ p: [15, -4, -13], c: [1.0, 0.12, 0.08], s: 3.2, k: 0, seed: 0.2 });   // the dark red city
+  list.push({ p: [-14, 3, -21], c: [1.0, 0.5, 0.82], s: 3.0, k: 1, seed: 0.5 });    // the candy world
+  list.push({ p: [5, 8, -36], c: [1.0, 1.0, 1.0], s: 2.6, k: 0, seed: 0.8 });       // the white conveyor world
+  // Countless more, spread through the void to the horizon.
+  for (let tries = 0; list.length < 60000 && tries < 120000; tries++) {
+    const ang = rnd() * Math.PI * 2, dist = 18 + Math.pow(rnd(), 1.35) * 3800;
     const x = Math.cos(ang) * dist, z = Math.sin(ang) * dist;
-    const g = (rnd() + rnd() + rnd() - 1.5) / 1.5;
-    const y = g * (40 + dist * 0.04);
-    const r = 0.8 + Math.pow(rnd(), 2.6) * 24;
-    const pos = V(x, y, z);
-    if (heroes.some((h) => h.pos.distanceTo(pos) < h.r + r + 6)) continue;
-    if (pathPts.some((p) => p.distanceTo(pos) < r + 30)) continue;
-    const kind = pickKind(rnd());
-    const [, as, bs] = KINDS[kind];
-    crowd.push({ pos, r, kind, a: as[Math.floor(rnd() * as.length)], b: bs[Math.floor(rnd() * bs.length)], tilt: (rnd() - 0.5) * 0.8, seed: rnd() });
+    const y = (rnd() + rnd() + rnd() - 1.5) / 1.5 * (30 + dist * 0.05);
+    if (dist < 400 && nearPath(x, y, z, 10)) continue;
+    const big = rnd();
+    const s = big > 0.995 ? 9 + rnd() * 8 : big > 0.95 ? 4 + rnd() * 4 : 1.2 + rnd() * 2.6;
+    const kr = rnd();
+    list.push({ p: [x, y, z], c: pickCol(rnd()).map((v) => v * (0.75 + rnd() * 0.6)), s, k: kr > 0.93 ? 1 : kr > 0.88 ? 2 : 0, seed: rnd() });
   }
-  makeSet(new THREE.IcosahedronGeometry(1, 3), crowd);
+  field.add(speckPoints(list));
 
-  // Beyond those: countless distant worlds as points of light, and the stars behind them.
-  const dots = (n, place, size, colors) => {
-    const pos = new Float32Array(n * 3), col = new Float32Array(n * 3), sz = new Float32Array(n), c = new THREE.Color();
-    for (let i = 0; i < n; i++) {
-      place(i, pos);
-      c.set(colors[Math.floor(rnd() * colors.length)]).multiplyScalar(0.6 + rnd() * 0.9);
-      col.set([c.r, c.g, c.b], i * 3);
-      sz[i] = size * (0.4 + rnd() * 1.2);
-    }
+  // The vortex in the void beneath it all — the loop itself — slowly turning.
+  vortex = new THREE.Mesh(new THREE.PlaneGeometry(2600, 2600), new THREE.ShaderMaterial({
+    uniforms, transparent: true, depthWrite: false,
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: VORTEX_FRAG,
+  }));
+  vortex.rotation.x = -Math.PI / 2;
+  vortex.position.set(-200, -460, -700);
+  vortex.renderOrder = -1;
+  ctx.scene.add(vortex);
+
+  // Debris around it: black ink flecks and white spray (normal blending so the black reads as black).
+  const fleck = (n, place, color, size) => {
+    const pos = new Float32Array(n * 3), sz = new Float32Array(n);
+    for (let i = 0; i < n; i++) { place(pos, i); sz[i] = size * (0.4 + rnd() * 1.4); }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
     geo.setAttribute('size', new THREE.BufferAttribute(sz, 1));
     const pts = new THREE.Points(geo, new THREE.ShaderMaterial({
-      uniforms, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, vertexColors: true,
-      vertexShader: `attribute float size; uniform float uScale; uniform float uTime; varying vec3 vC; varying float vF;
-        void main() {
-          vC = color;
-          vec4 mv = modelViewMatrix * vec4(position, 1.0);
-          vF = 0.75 + 0.25 * sin(uTime * 1.3 + position.x * 0.05 + position.z * 0.07);
-          gl_PointSize = clamp(size * uScale / max(1.0, -mv.z), 1.0, 14.0);
-          gl_Position = projectionMatrix * mv;
-        }`,
-      fragmentShader: `varying vec3 vC; varying float vF;
-        void main() {
-          float d = length(gl_PointCoord - 0.5);
-          if (d > 0.5) discard;
-          gl_FragColor = vec4(vC * vF, smoothstep(0.5, 0.0, d));
+      uniforms: { ...uniforms, uCol: { value: new THREE.Color(...color) } }, transparent: true, depthWrite: false,
+      vertexShader: `attribute float size; uniform float uScale; varying float vF;
+        void main() { vec4 mv = modelViewMatrix * vec4(position, 1.0); vF = smoothstep(3000.0, 600.0, -mv.z);
+          gl_PointSize = clamp(size * uScale / max(1.0, -mv.z), 1.0, 40.0); gl_Position = projectionMatrix * mv; }`,
+      fragmentShader: `uniform vec3 uCol; varying float vF;
+        void main() { vec2 q = gl_PointCoord - 0.5; q.x *= 1.6; float d = length(q); if (d > 0.5) discard;
+          gl_FragColor = vec4(uCol, smoothstep(0.5, 0.3, d) * vF);
           #include <colorspace_fragment>
         }`,
     }));
     pts.frustumCulled = false;
+    vortex.add(pts);
     return pts;
   };
-  const worldCols = [0xff3a2a, 0xff8fc8, 0x9fd8ff, 0xffd27a, 0xc9a7ff, 0xffffff, 0x7affc8];
-  field.add(dots(26000, (i, a) => {
-    const ang = rnd() * Math.PI * 2, d = 800 + Math.pow(rnd(), 0.8) * 3600;
-    a.set([Math.cos(ang) * d, (rnd() + rnd() - 1) * (60 + d * 0.06), Math.sin(ang) * d], i * 3);
-  }, 30, worldCols));
-  stars = dots(7000, (i, a) => {
-    _tmp.set(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize().multiplyScalar(4500);
-    a.set([_tmp.x, _tmp.y, _tmp.z], i * 3);
-  }, 14, [0xffffff, 0xcfe0ff, 0xffe6cf]);
+  // (vortex-local: plane spans ±1300 in x/y; +z is up off the plane)
+  fleck(1100, (a, i) => { const ang = rnd() * 6.28, r = 150 + rnd() * 200; a.set([Math.cos(ang) * r, Math.sin(ang) * r, 5 + rnd() * 120], i * 3); }, [0, 0, 0], 9);
+  fleck(1600, (a, i) => { const t = rnd(); a.set([220 + t * 500 + (rnd() - 0.5) * 200, -(100 + t * 300) + (rnd() - 0.5) * 200, 5 + rnd() * 60], i * 3); }, [1.2, 1.25, 1.3], 6);
+
+  // Tiny white specks everywhere, the void's dust.
+  const dust = [];
+  for (let i = 0; i < 6000; i++) {
+    _tmp.set(rnd() - 0.5, rnd() - 0.5, rnd() - 0.5).normalize().multiplyScalar(2400 + rnd() * 1700);
+    dust.push({ p: [_tmp.x, _tmp.y, _tmp.z], c: [0.75, 0.85, 1.0], s: 5 + rnd() * 8, k: 0, seed: rnd() });
+  }
+  stars = speckPoints(dust);
   ctx.scene.add(stars);
 
-  // A faint nebula behind everything, so the dark has depth.
-  sky = new THREE.Mesh(new THREE.SphereGeometry(4700, 48, 32), new THREE.ShaderMaterial({
+  // The void itself: deep navy, with cold blue haze drifting through it.
+  // (radius stays inside the camera's far plane from anywhere on the path)
+  sky = new THREE.Mesh(new THREE.SphereGeometry(4300, 64, 40), new THREE.ShaderMaterial({
     side: THREE.BackSide, depthWrite: false,
     vertexShader: 'varying vec3 vD; void main() { vD = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
     fragmentShader: `varying vec3 vD; ${NOISE}
       void main() {
-        float n = fbm(vD * 3.0 + 4.0), m = fbm(vD * 6.0 - 2.0);
-        vec3 c = mix(vec3(0.05, 0.0, 0.015), vec3(0.03, 0.0, 0.06), m) * smoothstep(0.35, 0.8, n);
-        c += vec3(0.08, 0.005, 0.02) * pow(smoothstep(0.55, 0.9, n), 2.0);
+        float n = fbm(vD * 2.5 + 4.0), m = fbm(vD * 5.0 - 2.0);
+        vec3 c = mix(vec3(0.004, 0.012, 0.028), vec3(0.01, 0.03, 0.06), smoothstep(-0.6, 0.3, -vD.y));
+        c += vec3(0.03, 0.07, 0.12) * smoothstep(0.45, 0.85, n) * (0.6 + 0.4 * m);
         gl_FragColor = vec4(c, 1.0);
         #include <colorspace_fragment>
       }`,
@@ -577,6 +548,7 @@ async function run(g) {
   // 3. ...and under it, we pull away: the ruby is one world among infinitely many.
   mode = 'pull';
   ruby.material.transmission = 0; // the transmission pass would re-render every world — not needed from far away
+  ruby.material.envMapIntensity = 0.25; ruby.material.clearcoat = 0.3;
   ruby.material.needsUpdate = true;
   audio.tone(36, 13, { type: 'sine', volume: 0.16 });
   audio.tone(54, 12, { type: 'sine', volume: 0.07 });
@@ -663,7 +635,8 @@ export default {
     uniforms.uTime.value = time;
     uniforms.uScale.value = window.innerHeight / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)));
     field.rotation.y = time * 0.0022;
-    field.visible = stars.visible = sky.visible = mode === 'pull'; // the close-up is just the stone in the dark
+    vortex.rotation.z = time * 0.01;
+    field.visible = stars.visible = sky.visible = vortex.visible = mode === 'pull'; // the close-up is just the stone in the dark
 
     // The ruby: slow turn, and the fire inside building with `shine`.
     ruby.rotation.y = time * 0.16;
@@ -704,7 +677,7 @@ export default {
       camera.lookAt(_look);
       camera.fov = 35 + 23 * p;
       camera.updateProjectionMatrix();
-      ctx.post.bloomStrength = 0.75 - 0.2 * p;
+      ctx.post.bloomStrength = 0.75 - 0.25 * p;
     }
     // The ruby as a red star at the centre once we're away from it.
     const d = camera.position.length();
@@ -722,7 +695,7 @@ export default {
     ui = subEl = titleEl = null;
     if (onKey) window.removeEventListener('keydown', onKey);
     onKey = null;
-    gem = ruby = core = rays = beacon = field = path = uniforms = stars = sky = null;
+    gem = ruby = core = rays = beacon = field = path = uniforms = stars = sky = vortex = null;
     glints = [];
     ctx = null;
   },
