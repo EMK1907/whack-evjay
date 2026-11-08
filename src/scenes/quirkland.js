@@ -10,7 +10,9 @@ import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometr
 // Inhabitants so far (E): the Intergalactic Kangaroo, the Infernal, the Kite (Skye), the Rock Guardian,
 // Water Girl and Tongue Guy.
 // The Masked Figure (§9) stands at the end of the north path. The hydrant says "He's unfamiliar." the first time
-// he's on screen; E → he removes his mask → the camera zooms into the ruby → goTo('ending').
+// he's on screen. He stands with his back to the valley; E → he looks over his shoulder, turns his whole body round
+// to face the player (no hands, no mask animation — his face is simply black, with the ruby in it) → the camera
+// zooms into the ruby → goTo('ending').
 
 const NAME = 'quirkland';
 const NEXT = 'ending';
@@ -2603,13 +2605,14 @@ function ik2(upper, lower, L1, L2, target, hint, front) {
   aimBone(lower, _ikL, front);
 }
 
+const FIG_AWAY = Math.PI;  // the figure starts facing away from the valley (-z)
 const FIG = { hipY: 3.47, thigh: 1.8, shin: 1.7, spine: 0.75, chest: 0.85, neck: 0.6, upper: 1.45, fore: 1.35 };
 
 function buildMaskedFigure() {
   const [x, z] = SPOTS.masked;
   const root = new THREE.Group();
   root.position.set(x, H(x, z), z);
-  root.rotation.y = Math.atan2(-x, -z) + Math.PI / 2; // stands side-on to the valley: it has to turn to notice you
+  root.rotation.y = FIG_AWAY; // back turned to the valley the player walks up: it has to turn round to face you
   ctx.scene.add(root);
 
   // Cold fresnel rim so the black silhouette reads against the grey clearing.
@@ -2724,7 +2727,7 @@ function buildMaskedFigure() {
   gl_FragColor.rgb += vec3(1.0, 0.04, 0.07) * (crackCore * 3.2 + crackHalo * 0.35) * glow;`);
   };
   const mask = mesh(maskGeo, maskMat, MC.x, MC.y, MC.z, head);
-  mask.visible = false;
+  mask.visible = true; // his face: solid glossy black from the start, ruby set in the forehead
 
   // The ruby is embedded in the forehead of the mask (sunk a little into the surface).
   const rubyMat = std(0xd0002a, { roughness: 0.12, metalness: 0.3, emissive: 0x3a0006, emissiveIntensity: 1, flatShading: true, side: THREE.DoubleSide });
@@ -2781,7 +2784,7 @@ function buildMaskedFigure() {
     root.updateMatrixWorld(true);
     const plant = root.localToWorld(new THREE.Vector3(sx * 0.17, 0, 0.02));
     plant.y = H(plant.x, plant.z) + 0.05;
-    legs.push({ thigh, shin, foot, plant });
+    legs.push({ thigh, shin, foot, plant, home: plant.clone(), sx, step: null, from: new THREE.Vector3(), to: new THREE.Vector3(), t: 0 });
   }
 
   // Coat: verlet cloth hanging from a ring around the upper chest, open at the front.
@@ -2832,7 +2835,8 @@ function buildMaskedFigure() {
     group: root, root, hips, spine, chest, neck, head, mask, maskU, ruby, arms, legs, coat, coatMesh, dust, fogs,
     seen: false, revealing: false, token: 0, done: false,
     // drive values (sequence sets these; springs smooth them)
-    attend: sp(0), torsoFollow: 0, lookUp: sp(0), handOnHead: 0, handBlend: sp(0), fingerCurl: 0, maskGrow: 0, crackGlow: 0,
+    attend: sp(0), torsoFollow: 0, lookUp: sp(0), handOnHead: 0, handBlend: sp(0), fingerCurl: 0, maskGrow: 1, crackGlow: 0,
+    rootYaw: sp(FIG_AWAY), yawTarget: FIG_AWAY,
     yaw: { hips: sp(), spine: sp(), chest: sp(), neck: sp(), head: sp() },
     pitch: { chest: sp(), neck: sp(), head: sp() },
     cam: null,
@@ -2857,6 +2861,7 @@ function resetCoat(mf) {
   }
 }
 
+const _stepV = new THREE.Vector3();
 function updateFigure(mf, dt) {
   const t = time;
   const { root, hips, spine, chest, neck, head } = mf;
@@ -2896,6 +2901,23 @@ function updateFigure(mf, dt) {
   neck.rotation.set(P.neck.x + 0.015 * noise(t * 0.5, 8), Y.neck.x, 0.02 * noise(t * 0.4, 10));
   head.rotation.set(P.head.x + 0.02 * noise(t * 0.7, 3), Y.head.x + 0.02 * noise(t * 0.55, 12), 0.05 + 0.03 * noise(t * 0.6, 2));
   root.updateMatrixWorld(true);
+
+  // ---- whole-body turn: the root yaw springs round; feet step to keep up (one foot at a time, lifted in an arc) ----
+  root.rotation.y = spring(mf.rootYaw, mf.yawTarget, 1.1, dt);
+  root.updateMatrixWorld(true);
+  for (let i = 0; i < 2; i++) {
+    const L = mf.legs[i], O = mf.legs[1 - i];
+    if (L.step) {
+      L.t = Math.min(1, L.t + dt / 0.45);
+      L.plant.lerpVectors(L.from, L.to, smoother(L.t));
+      L.plant.y += Math.sin(Math.PI * L.t) * 0.16;
+      if (L.t >= 1) { L.plant.copy(L.to); L.step = false; }
+    } else if (!O.step) {
+      root.localToWorld(_stepV.set(L.sx * 0.17, 0, 0.02));
+      _stepV.y = H(_stepV.x, _stepV.z) + 0.05;
+      if (_stepV.distanceToSquared(L.plant) > 0.11 * 0.11) { L.from.copy(L.plant); L.to.copy(_stepV); L.t = 0; L.step = true; }
+    }
+  }
 
   // ---- legs: feet planted (2-bone IK every frame, knees forward) ----
   _front.set(0, 0, 1).transformDirection(root.matrixWorld);
@@ -2941,7 +2963,7 @@ function updateFigure(mf, dt) {
   mf.maskU.uGrow.value = mf.maskGrow;
   mf.maskU.uCrack.value = mf.crackGlow;
   mf.maskU.uTime.value = t;
-  mf.mask.visible = mf.maskGrow > 0.001;
+  mf.mask.visible = true;
 
   updateCoat(mf, dt);
 
@@ -3126,36 +3148,26 @@ async function runReveal(mf, token) {
   audio.tone(55, 9, { type: 'sine', volume: 0.13 });
   audio.tone(58, 9, { type: 'sine', volume: 0.09 });
 
-  // 1. It notices you: the head turns first...
-  await wait(0.6); if (!ok()) return;
+  // 1. It notices you: the head turns first, looking back over its shoulder...
+  await wait(0.8); if (!ok()) return;
   mf.attending = true;
-  await wait(1.3); if (!ok()) return;
-  // ...then the torso slowly follows (the head counter-rotates to stay on you).
+  await wait(1.6); if (!ok()) return;
+  // ...the shoulders twist after it...
   mf.torsoFollow = 1;
-  await wait(2.8); if (!ok()) return;
+  await wait(1.2); if (!ok()) return;
 
-  // 2. The head tilts back and looks up.
-  mf.lookingUp = true;
-  await wait(3.0); if (!ok()) return;
-
-  // 3. One hand rises slowly, overshoots a touch, and settles on top of its head; the fingers curl.
-  mf.handOnHead = 1;
+  // 2. ...then the whole body turns round to face you, step by step. Its hands stay hanging at its sides.
+  {
+    const want = Math.atan2(mf.cam.goal.x - mf.root.position.x, mf.cam.goal.z - mf.root.position.z);
+    const d = Math.atan2(Math.sin(want - mf.rootYaw.x), Math.cos(want - mf.rootYaw.x));
+    mf.yawTarget = mf.rootYaw.x + d;
+  }
   audio.tone(41, 5, { type: 'sine', volume: 0.1 });
-  await wait(3.6); if (!ok()) return;
-  mf.fingerCurl = 1;
-  await wait(1.6); if (!ok()) return;
+  audio.noise(2.5, { volume: 0.03 });
+  await wait(4.6); if (!ok()) return;
 
-  // 4. A black mask forms over the face, growing out from the centre. The head comes down to stare at you.
-  mf.lookingUp = false;
-  audio.noise(3, { volume: 0.04 });
-  await tween(4.0, (t) => { mf.maskGrow = smoother(t); });
-  if (!ok()) return;
-  // Only once the mask is whole does the crack begin to glow — and to beat.
-  await wait(0.7); if (!ok()) return;
-  audio.tone(46, 2.5, { type: 'sine', volume: 0.12 });
-  await tween(1.6, (t) => { mf.crackGlow = smoother(t); });
-  if (!ok()) return;
-  await wait(1.6); if (!ok()) return;
+  // 3. It stands facing you. Stillness — just the breathing — and the ruby in its black face.
+  await wait(1.4); if (!ok()) return;
 
   // 5. The camera slowly pushes in to the ruby until it covers all four corners of the screen.
   const c = mf.cam;
@@ -3178,7 +3190,9 @@ async function runReveal(mf, token) {
 function resetFigure(mf) {
   mf.token++;
   mf.revealing = false; mf.attending = false; mf.torsoFollow = 0; mf.lookingUp = false;
-  mf.handOnHead = 0; mf.fingerCurl = 0; mf.maskGrow = 0; mf.crackGlow = 0; mf.cam = null; mf.done = false;
+  mf.handOnHead = 0; mf.fingerCurl = 0; mf.maskGrow = 1; mf.crackGlow = 0; mf.cam = null; mf.done = false;
+  mf.rootYaw.x = FIG_AWAY; mf.rootYaw.v = 0; mf.yawTarget = FIG_AWAY; mf.root.rotation.y = FIG_AWAY;
+  for (const L of mf.legs) { L.plant.copy(L.home); L.step = false; }
   for (const s of [mf.attend, mf.lookUp, mf.handBlend, ...Object.values(mf.yaw), ...Object.values(mf.pitch)]) { s.x = 0; s.v = 0; }
   for (const A of mf.arms) { A.init = false; A.wrist.x = 0.1; A.wrist.v = 0; for (const F of A.fingers) { F.curl.x = F.base; F.curl.v = 0; } }
 }
