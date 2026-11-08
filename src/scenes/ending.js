@@ -391,15 +391,45 @@ function buildWorlds() {
 }
 
 // ---------- 5–6. voice, subtitle, title ----------
+const LINE_CSS = `
+.end-line { position: absolute; left: 50%; top: 47%; transform: translate(-50%, -50%); width: min(92vw, 1500px); text-align: center;
+  font-family: 'Rubik Wet Paint', 'Arial Black', Impact, sans-serif; font-weight: 900; font-size: clamp(44px, 7.4vw, 124px);
+  line-height: 1.22; letter-spacing: 0.02em; transition: opacity 1.6s ease; }
+.end-line.live { animation: end-flicker 5s steps(1) infinite; }
+@keyframes end-flicker { 0%, 100% { opacity: 1; } 41% { opacity: 0.86; } 42% { opacity: 1; } 77% { opacity: 0.92; } 78% { opacity: 1; } }
+.end-w { display: inline-block; position: relative; margin: 0 0.15em; opacity: 0; transform: translateY(0.3em) scale(1.3); filter: blur(12px);
+  transition: opacity 0.9s ease, transform 1s cubic-bezier(0.2, 0.9, 0.25, 1.25), filter 0.9s ease; }
+.end-w.on { opacity: 1; transform: none; filter: blur(0); }
+.end-g { display: inline-block; color: transparent; -webkit-background-clip: text; background-clip: text;
+  background-image: linear-gradient(180deg, #ff8a8a 0%, #ff2433 20%, #cc0012 52%, #74000a 82%, #3c0004 100%);
+  filter: drop-shadow(0 0.045em 0 #2a0002) drop-shadow(0 0 0.22em rgba(255, 0, 28, 0.5)) drop-shadow(0 0.16em 0.12em rgba(0, 0, 0, 0.95));
+  animation: end-wob var(--d, 3s) ease-in-out var(--dl, 0s) infinite alternate; }
+@keyframes end-wob { from { transform: translateY(-0.025em) rotate(-1.4deg) scale(1); } to { transform: translateY(0.035em) rotate(1.4deg) scale(1.035); } }
+.end-drip { position: absolute; top: 0.8em; width: var(--w); height: 0; border-radius: 0 0 999px 999px; z-index: -1;
+  background: linear-gradient(180deg, #6a0007, #a8000e 55%, #d0101e); box-shadow: 0 0.05em 0.08em rgba(0, 0, 0, 0.85);
+  animation: end-drip var(--t) cubic-bezier(0.55, 0, 0.85, 0.55) var(--dl) forwards; }
+.end-drip::after { content: ''; position: absolute; left: 50%; bottom: -0.06em; width: 175%; aspect-ratio: 1 / 1.2; transform: translateX(-50%);
+  border-radius: 50% 50% 50% 50% / 38% 38% 62% 62%; background: radial-gradient(circle at 34% 30%, #ff5a5f, #b0000e 55%, #4e0005); }
+.end-w:not(.on) .end-drip { animation-play-state: paused; }
+@keyframes end-drip { to { height: var(--h); } }
+`;
+
 function buildUI() {
+  if (!document.querySelector('link[data-end-font]')) {
+    const l = document.createElement('link');
+    l.rel = 'stylesheet';
+    l.href = 'https://fonts.googleapis.com/css2?family=Rubik+Wet+Paint&display=swap';
+    l.dataset.endFont = '1';
+    document.head.appendChild(l);
+  }
+  document.fonts?.load('400 80px "Rubik Wet Paint"').catch(() => {});
   ui = document.createElement('div');
   Object.assign(ui.style, { position: 'fixed', inset: '0', pointerEvents: 'none', zIndex: '40' });
+  const css = document.createElement('style');
+  css.textContent = LINE_CSS;
   subEl = document.createElement('div');
-  Object.assign(subEl.style, {
-    position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -50%)', width: '90%', textAlign: 'center',
-    color: '#fff', font: '500 clamp(18px, 2.4vw, 30px) "Helvetica Neue", system-ui, sans-serif', letterSpacing: '0.04em',
-    textShadow: '0 0 22px rgba(255,20,40,0.35)', opacity: '0', transition: 'opacity 1.4s ease',
-  });
+  subEl.className = 'end-line';
+  subEl.style.opacity = '0';
   titleEl = document.createElement('div');
   titleEl.textContent = 'LOOP';
   Object.assign(titleEl.style, {
@@ -407,11 +437,40 @@ function buildUI() {
     color: 'rgba(255,255,255,0.9)', font: '300 clamp(16px, 1.6vw, 22px) "Helvetica Neue", system-ui, sans-serif',
     letterSpacing: '0.9em', opacity: '0', transition: 'opacity 3.5s ease',
   });
-  ui.append(subEl, titleEl);
+  ui.append(css, subEl, titleEl);
   document.body.appendChild(ui);
 }
 
-function speak(text) {
+// Builds the line as separate words (hidden), each with its own sway and a few blood drips.
+function setLine(text) {
+  subEl.textContent = '';
+  const rnd = mulberry32(5);
+  return text.split(' ').map((w) => {
+    const word = document.createElement('span');
+    word.className = 'end-w';
+    const glyphs = document.createElement('span');
+    glyphs.className = 'end-g';
+    glyphs.textContent = w;
+    glyphs.style.setProperty('--d', `${(2.2 + rnd() * 1.8).toFixed(2)}s`);
+    glyphs.style.setProperty('--dl', `${(-rnd() * 3).toFixed(2)}s`);
+    word.appendChild(glyphs);
+    const n = w.length <= 2 ? (rnd() < 0.4 ? 1 : 0) : 1 + (rnd() < 0.55 ? 1 : 0) + (w.length > 5 && rnd() < 0.5 ? 1 : 0);
+    for (let k = 0; k < n; k++) {
+      const d = document.createElement('span');
+      d.className = 'end-drip';
+      d.style.left = `${(8 + rnd() * 78).toFixed(1)}%`;
+      d.style.setProperty('--w', `${(0.05 + rnd() * 0.06).toFixed(3)}em`);
+      d.style.setProperty('--h', `${(0.2 + Math.pow(rnd(), 1.5) * 0.95).toFixed(2)}em`);
+      d.style.setProperty('--t', `${(3 + rnd() * 5).toFixed(2)}s`);
+      d.style.setProperty('--dl', `${(0.5 + rnd() * 1.8).toFixed(2)}s`);
+      word.appendChild(d);
+    }
+    subEl.appendChild(word);
+    return word;
+  });
+}
+
+function speak(text, onWord) {
   return new Promise((resolve) => {
     const synth = window.speechSynthesis;
     let done = false;
@@ -429,6 +488,7 @@ function speak(text) {
       if (v) u.voice = v;
       u.pitch = 0.05; u.rate = 0.7; u.volume = 1;
       u.onend = fin; u.onerror = fin;
+      u.onboundary = (ev) => { if (onWord && ev.charIndex != null) onWord(ev.charIndex); };
       synth.speak(u);
     };
     if (synth.getVoices().length) go();
@@ -486,11 +546,18 @@ async function run(g) {
 
   // 5. A deep voice.
   rumble(audio);
-  subEl.textContent = LINE;
+  const words = setLine(LINE);
   subEl.style.opacity = '1';
-  await Promise.all([speak(LINE), wait(4.5)]);
+  subEl.classList.add('live');
+  // Each word fades in as it is spoken (speech word boundaries), with a steady schedule as the fallback.
+  let shown = -1;
+  const show = (i) => { while (shown < Math.min(i, words.length - 1)) words[++shown].classList.add('on'); };
+  words.forEach((_, i) => setTimeout(() => { if (alive(g)) show(i); }, 300 + i * 430));
+  const onWord = (charIndex) => { if (alive(g)) show(LINE.slice(0, charIndex).split(' ').length - 1); };
+  await Promise.all([speak(LINE, onWord), wait(words.length * 0.43 + 1.2)]);
   if (!alive(g)) return;
-  await wait(1.6); if (!alive(g)) return;
+  show(words.length - 1);
+  await wait(2.6); if (!alive(g)) return;
   subEl.style.opacity = '0';
   await wait(2.6); if (!alive(g)) return;
 
