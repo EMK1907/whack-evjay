@@ -87,43 +87,80 @@ The camera then zooms smoothly down into the mini world and right into the fire 
 
 The whole sequence, from pressing E to arriving in Quirkland, takes about 7–8 seconds.
 
-## 7. Quirkland — Meeting the Fire Hydrant
+## 7. Quirkland — Arrival and the Fire Hydrant
 
-Once the player arrives in Quirkland, they encounter a character who is a fire hydrant.
+The globe transition ends by zooming into the fire hydrant. The camera pulls back and the player is standing right in front of him in **Quirkland**.
 
-A cutscene begins.
+### What Quirkland looks like
 
-The fire hydrant explains the story of Quirkland.
+Quirkland looks like a child's imagination:
 
-He explains that he has his own ability because he is a fire hydrant.
+- Bright, warm, soft rolling terrain in playful colours — bright green grass, rounded hills and wobbly paths.
+- Cartoon-like but smooth and polished. Nothing is blocky: rounded shapes, smooth surfaces and eased animation.
+- Candy is scattered across the terrain: lollipops, sweets, candy canes and gumdrops.
+- **There is no sky.** Above is a ceiling covered in many identical big smiling mouths, all moving in sync. It should feel slightly unsettling. The rest of the ceiling is a bright, childlike pattern and colour.
 
-However, he is faded because children have forgotten about him.
+### Remembered and faded
 
-The stronger inhabitants of Quirkland are not faded because children still think about them.
+Every character in Quirkland has a **remembered** value from 0 to 1 — how much children still think about them.
 
-The explanation should establish the relationship between the inhabitants' existence, their abilities and whether children remember them.
+- The value controls how faded (transparent) and desaturated the character looks.
+- The more a child forgets a character, the more they fade and the weaker their ability becomes.
+- Strongly remembered characters are bright, solid and powerful.
+- The fire hydrant's remembered value is **0.2** — very faded.
+
+### The intro cutscene
+
+A cutscene begins. The fire hydrant explains the story of Quirkland, his ability, why he is faded, and that the stronger inhabitants are bright because children still dream about them. Speaker: "Fire Hydrant". Use these lines exactly:
+
+1. "Oh! A visitor. We haven't had one of those in... well, ever."
+2. "Welcome to Quirkland. Everything here was dreamed up by children — every creature, every tree, every gust of wind."
+3. "We exist because they imagine us. Air, Fire, Nature, Water — four corners, each one built from their stories."
+4. "Me? I'm a fire hydrant. I keep things safe. When fire gets out of hand, I put it out. That's my ability."
+5. "But look at me. See how faded I am? Children don't think about fire hydrants anymore."
+6. "The more a child forgets you, the more you fade. Your ability weakens. One day... you just aren't here."
+7. "The others — the kangaroo, the kite, the infernal one — they're bright and strong. Children still dream about them every night."
+8. "Come on. I'll show you around. Stick close — I don't get to talk to anyone new."
 
 ## 8. Exploring Quirkland and Meeting Its Inhabitants
 
 After the fire hydrant's cutscene, the player is free to walk around Quirkland.
 
-The player can approach and interact with the inhabitants.
-
-Use the **E key** to interact with characters and relevant objects.
-
 The fire hydrant becomes the player's companion and follows them around.
 
-He explains his own ability and demonstrates it to the player.
+The player can approach the inhabitants and press the **E key** to interact with them and other relevant objects.
 
-Other characters should also demonstrate their own abilities.
+Each character demonstrates their own ability, and the fire hydrant reacts. The player should be able to explore and discover these abilities through interactions.
 
-The player should be able to explore and discover these abilities through interactions.
+### The fire hydrant's ability
+
+Press E on him after the intro:
+
+- "Watch this!" — he sprays a weak, sputtering arc of water that fizzles out halfway.
+- "...It used to reach the clouds. Back when they remembered me."
+
+### The cast of inhabitants
+
+Quirkland has seven inhabitants. Details marked *TBD* are still to be decided.
+
+1. **Kite (air)** — "Skye". Bright and strong.
+   - E: "Every windy day, a child somewhere runs with a kite. That's what keeps me flying!"
+   - Ability: a strong gust lifts the player briefly into the air, then sets them down.
+   - Fire Hydrant: "I used to be able to do that with water. Sort of."
+2. **Tongue guy** — *TBD* (appearance, remembered value, lines, ability).
+3. **Infernal (fire)** — "the infernal one". Bright and strong. *TBD* (lines, ability).
+4. **Water girl** — *TBD* (appearance, remembered value, lines, ability).
+5. **Intergalactic Kangaroo** — Bright and strong. *TBD* (lines, ability).
+6. **Rock Guardian** — *TBD* (appearance, remembered value, lines, ability).
+7. **Masked Figure** — see section 9.
 
 ## 9. The Mysterious Masked Figure
 
+The Masked Figure is the seventh inhabitant of Quirkland.
+
 While exploring Quirkland, the player encounters a mysterious figure wearing a mask.
 
-The fire hydrant reacts to the figure and says exactly:
+When the player first sees him, the fire hydrant reacts and says exactly:
 
 **"He's unfamiliar."**
 

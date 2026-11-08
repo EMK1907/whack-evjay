@@ -2,6 +2,8 @@
 //   await ctx.dialogue.say('Hello', { speaker: 'Fire Hydrant' });
 //   await ctx.dialogue.play([{ speaker: 'Hydrant', text: '...' }, 'plain line', { text: '...', duration: 2000 }]);
 // E / Enter / click: finish typing, then advance. `duration` (ms) auto-advances after typing.
+// Optional per line: `color` (speaker name colour), `onStart(line, index)` (fires when the line appears).
+// `dialogue.speaker` / `dialogue.typing` let scenes animate whoever is talking.
 // While active, E is consumed here so it doesn't also trigger an interaction.
 
 const CHARS_PER_SEC = 45;
@@ -41,6 +43,12 @@ export class Dialogue {
 
   get active() { return this._current !== null; }
 
+  /** Speaker of the line currently on screen, or null. */
+  get speaker() { return this._current ? this._current.speaker || null : null; }
+
+  /** True while the current line is still typing out. */
+  get typing() { return this._typing !== null; }
+
   say(text, opts = {}) {
     return this.play([{ text, ...opts }]);
   }
@@ -74,8 +82,12 @@ export class Dialogue {
     this._current = line;
     this.speakerEl.textContent = line.speaker || '';
     this.speakerEl.style.display = line.speaker ? 'block' : 'none';
+    this.speakerEl.style.color = line.color || '#ffd166';
     this.textEl.textContent = '';
     this.box.style.display = 'block';
+    if (line.onStart) {
+      try { line.onStart(line, this._index); } catch (e) { console.error(e); }
+    }
 
     let shown = 0;
     this._typing = setInterval(() => {
