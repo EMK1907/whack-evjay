@@ -39,20 +39,9 @@ When it is the player's turn, something goes wrong.
 
 This should feel like a system malfunction.
 
-## 3. Falling Through London
+## 3. Falling Into the Upside-Down World
 
-The player exits the opening area and begins falling.
-
-During the fall, the player passes upside-down landmarks and buildings, including:
-
-- The Shard
-- The London Eye
-- Other recognisable London buildings
-- The Marshall Wace building, with its writing visible
-
-The player should be able to see these buildings while falling through the environment.
-
-The world should look inverted, creating a strange and disorientating experience.
+After the error, the player passes through the conveyor exit and falls directly into the upside-down London world (section 4), landing on the ceiling.
 
 ## 4. Landing in the Inverted World
 
@@ -61,6 +50,8 @@ The player eventually lands on the ceiling of a dark, gloomy, upside-down world.
 The environment should have a dark red atmosphere.
 
 Buildings and structures are upside down, and the player is effectively standing on what would normally be the ceiling of the world.
+
+The inverted world is an upside-down London at night: old brick and white-stucco terraced streets, red telephone boxes, red double-decker buses, black taxis, London street signs and Underground roundels, with London landmarks around the city — The Shard, the London Eye, Elizabeth Tower (Big Ben) and The Gherkin. It includes a modern glass Marshall Wace building with its name lit up in large letters on the facade.
 
 The player can explore this environment.
 

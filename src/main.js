@@ -18,13 +18,15 @@ import { Effects } from './core/effects.js';
 import { AudioManager } from './core/audio.js';
 
 import conveyor from './scenes/conveyor.js';
-import fall from './scenes/fall.js';
 import inverted from './scenes/inverted.js';
 import quirkland from './scenes/quirkland.js';
 import ending from './scenes/ending.js';
 
-const ORDER = [conveyor, fall, inverted, quirkland, ending];
+// Game flow. The conveyor exits straight into the inverted world (src/scenes/fall.js is kept but unused).
+const ORDER = [conveyor, inverted, quirkland, ending];
 const SCENES = Object.fromEntries(ORDER.map((s) => [s.name, s]));
+// Retired scene names still requested by older scene code → where they go now.
+const REDIRECTS = { fall: 'inverted' };
 const params = new URLSearchParams(location.search);
 const DEBUG = params.has('debug');
 
@@ -260,7 +262,12 @@ const interact = new Interact(camera, {
   getOccluders: () => player.colliders,
 });
 
-async function goTo(name) {
+/**
+ * Switch scene. Options: fadeColor (CSS colour of the transition, default black), fadeOutMs / fadeInMs
+ * (default 400 each). E.g. ctx.goTo('quirkland', { fadeColor: '#fff', fadeOutMs: 300 }) for a white flash.
+ */
+async function goTo(name, { fadeColor = '#000', fadeOutMs = 400, fadeInMs = 400 } = {}) {
+  if (REDIRECTS[name]) name = REDIRECTS[name];
   if (!SCENES[name]) {
     console.error(`goTo: unknown scene "${name}". Valid: ${Object.keys(SCENES).join(', ')}`);
     return;
@@ -269,7 +276,7 @@ async function goTo(name) {
   transitioning = true;
   try {
     if (current) {
-      await effects.fadeOut(400);
+      await effects.fadeOut(fadeOutMs, fadeColor);
       try { current.dispose?.(); } catch (e) { console.error(e); }
     }
     current = null;
@@ -301,7 +308,7 @@ async function goTo(name) {
     transitioning = false;
     perf.settle = 1; // don't judge performance on the frames around a scene change
   }
-  effects.fadeIn(400);
+  effects.fadeIn(fadeInMs); // fades in from whatever colour we faded out to
 }
 
 function disposeScene(scene) {
@@ -395,7 +402,7 @@ renderer.setAnimationLoop(() => {
 });
 
 // ---------- start ----------
-const requested = params.get('scene');
+const requested = REDIRECTS[params.get('scene')] || params.get('scene');
 if (requested && !SCENES[requested]) console.warn(`?scene=${requested} unknown, starting at conveyor`);
 effects.setFade(1);
 goTo(SCENES[requested] ? requested : 'conveyor');
